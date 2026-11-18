@@ -152,6 +152,8 @@ pub struct App {
     pub output_cursors: BTreeMap<String, usize>,
     pub last_advance: Instant,
     pub span_canvas: Option<Rect>,
+    /// PID of the external Wallpaper Engine process, when one is running.
+    pub engine_pid: Option<u32>,
     rng: u64,
 }
 
@@ -193,6 +195,7 @@ impl App {
             output_cursors: BTreeMap::new(),
             last_advance: Instant::now(),
             span_canvas: None,
+            engine_pid: None,
             rng: seed(),
         }
     }
@@ -288,6 +291,11 @@ impl App {
         if out.surface.is_some() || !out.alive || !self.cfg.has_wallpaper() {
             return;
         }
+        // Wallpaper Engine scenes belong to the external engine: no surface and
+        // no player here, otherwise we would paint over it (or fight it).
+        if crate::engine::marker_id(&self.cfg.path_for(&out.name)).is_some() {
+            return;
+        }
 
         let surface = compositor.create_surface(&self.qh, Slot(slot));
         let layer = shell.get_layer_surface(
@@ -310,6 +318,11 @@ impl App {
 
         out.surface = Some(surface.clone());
         out.layer = Some(layer);
+        // A fresh layer surface has no size until the compositor configures it,
+        // and attaching a buffer before that is a protocol error. Forget the
+        // old size so nothing paints into it until `on_configure` arrives.
+        out.configured = false;
+        out.pixels = (0, 0);
         surface.commit();
         log::debug!("surface created for {}", out.name);
     }
@@ -365,7 +378,7 @@ impl App {
             let out = &self.outputs[slot];
             self.cfg.path_for(&out.name)
         };
-        if path.is_empty() {
+        if path.is_empty() || crate::engine::marker_id(&path).is_some() {
             return;
         }
 
@@ -475,6 +488,9 @@ impl App {
         };
         out.dirty.store(false, Ordering::Release);
 
+        if !out.configured {
+            return;
+        }
         let (Some(player), Some(surface), Some(context)) =
             (out.player.as_ref(), out.egl_surface, out.context)
         else {
@@ -599,6 +615,7 @@ impl App {
             self.outputs
                 .iter()
                 .filter(|out| out.alive && out.configured && out.logical.0 > 0)
+                .filter(|out| crate::engine::marker_id(&self.cfg.path_for(&out.name)).is_none())
                 .map(Output::rect),
         )
     }
@@ -608,10 +625,13 @@ impl App {
     /// Safe to call on every tick: it only talks to mpv when the canvas or the
     /// video aspect changes.
     pub fn apply_span(&mut self) {
+        // Screens painted by the external engine are not part of veil's canvas:
+        // spanning our player across them would misplace it.
         let monitors = self
             .outputs
             .iter()
             .filter(|out| out.alive && out.configured)
+            .filter(|out| crate::engine::marker_id(&self.cfg.path_for(&out.name)).is_none())
             .count();
         let enabled = self.cfg.wallpaper.span && monitors > 1;
 
@@ -871,6 +891,7 @@ impl App {
         // A per-monitor picture only makes sense without span; choosing one
         // is an implicit request to leave the shared canvas.
         self.cfg.wallpaper.span = false;
+        let is_engine = crate::engine::marker_id(&path).is_some();
         self.cfg.outputs.insert(output.to_string(), path);
         let Some(slot) = self
             .outputs
@@ -881,6 +902,10 @@ impl App {
         };
         self.outputs[slot].player = None;
         self.outputs[slot].span_applied = None;
+        if is_engine {
+            self.teardown(slot);
+            return;
+        }
         self.create_surface(slot);
         self.ensure_stream(slot);
         self.paint(slot);
@@ -907,6 +932,11 @@ impl App {
             out.fade = None;
         }
         for slot in slots {
+            let name = self.outputs[slot].name.clone();
+            if crate::engine::marker_id(&self.cfg.path_for(&name)).is_some() {
+                self.teardown(slot);
+                continue;
+            }
             self.create_surface(slot);
             self.ensure_stream(slot);
         }
@@ -964,6 +994,23 @@ impl App {
         }
     }
 
+    /// Monitors that the external engine has to paint right now.
+    pub fn engine_targets(&self) -> Vec<crate::engine::Target> {
+        self.outputs
+            .iter()
+            .filter(|out| out.alive)
+            // The engine owns the screen from the start: our layer surface is
+            // torn down for it, so `configured` is false by design.
+            .filter_map(|out| {
+                let path = self.cfg.path_for(&out.name);
+                crate::engine::marker_id(&path).map(|id| crate::engine::Target {
+                    screen: out.name.clone(),
+                    id: id.to_string(),
+                })
+            })
+            .collect()
+    }
+
     pub fn status(&self) -> serde_json::Value {
         let outputs: Vec<_> = self
             .outputs
@@ -971,6 +1018,13 @@ impl App {
             .filter(|o| o.alive)
             .map(|o| {
                 let player = o.player.as_ref();
+                let configured_path = self.cfg.path_for(&o.name);
+                let engine_id = crate::engine::marker_id(&configured_path).map(str::to_string);
+                let shown = if engine_id.is_some() || o.current.is_empty() {
+                    configured_path
+                } else {
+                    o.current.clone()
+                };
                 serde_json::json!({
                     "name": o.name,
                     "logical": { "width": o.logical.0, "height": o.logical.1 },
@@ -979,7 +1033,9 @@ impl App {
                     "scale": o.scale,
                     "configured": o.configured,
                     "override": self.cfg.has_override(&o.name),
-                    "path": if o.current.is_empty() { self.cfg.path_for(&o.name) } else { o.current.clone() },
+                    "path": shown,
+                    "backend": if engine_id.is_some() { "engine" } else { "video" },
+                    "engine_id": engine_id.unwrap_or_default(),
                     "decoder": player.and_then(|p| p.get_property("hwdec-current")),
                     "codec": player.and_then(|p| p.get_property("video-codec")),
                     "frames": o.frames.load(Ordering::Relaxed),
@@ -1024,6 +1080,11 @@ impl App {
                 } else {
                     0
                 },
+            },
+            "engine": {
+                "pid": self.engine_pid,
+                "binary": self.cfg.engine.binary,
+                "assets": self.cfg.engine.assets,
             },
             "outputs": outputs,
         })

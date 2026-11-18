@@ -21,6 +21,9 @@ fn usage() {
          \x20 veilctl install <id|url> [--sha256 HEX] [--no-apply]\n\
          \x20                                    download from the workshop\n\
          \x20 veilctl catalog [query] [--url URL]\n\
+         \x20 veilctl engine list|status             Wallpaper Engine content\n\
+         \x20 veilctl engine apply <id> [--output DP-1]\n\
+         \x20 veilctl engine props <id>              scene settings\n\
          \x20                                    list the workshop catalogue\n\
          \x20 veilctl reload                     re-read the config file\n\
          \x20 veilctl quit                       stop the daemon\n\
@@ -254,6 +257,179 @@ fn catalog_list(args: &[String]) {
     println!("\n{} entries in {}", catalog.entries.len(), cfg.catalog.url);
 }
 
+fn engine_command(args: &[String]) {
+    use veil::engine;
+
+    match args.get(1).map(String::as_str) {
+        Some("apply") => {
+            let Some(reference) = args.get(2) else {
+                eprintln!("veilctl: `engine apply` needs a workshop id");
+                std::process::exit(2);
+            };
+            let id = engine::marker_id(reference)
+                .unwrap_or(reference)
+                .to_string();
+            let mut output: Option<String> = None;
+            let mut index = 3;
+            while index < args.len() {
+                match args[index].as_str() {
+                    "--output" | "-o" => {
+                        output = args.get(index + 1).cloned();
+                        index += 2;
+                    }
+                    other => {
+                        eprintln!("veilctl: unknown option `{other}`");
+                        std::process::exit(2);
+                    }
+                }
+            }
+            match engine::find(&id) {
+                Some(item) if item.supported => {}
+                Some(item) => {
+                    eprintln!(
+                        "veilctl: `{}` is a `{}` wallpaper; linux-wallpaperengine cannot draw it",
+                        item.title, item.kind
+                    );
+                    std::process::exit(1);
+                }
+                None => {
+                    eprintln!(
+                        "veilctl: no wallpaper {id} in the Steam workshop folder; subscribe to it in Wallpaper Engine first"
+                    );
+                    std::process::exit(1);
+                }
+            }
+            let request = Request::Set {
+                path: Some(format!("{}{id}", engine::MARKER)),
+                mode: None,
+                output,
+                clear_outputs: false,
+            };
+            match ipc::call(&request) {
+                Ok(_) => println!("{}{id}", engine::MARKER),
+                Err(error) => {
+                    eprintln!("veilctl: {error}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        Some("props") => {
+            let Some(reference) = args.get(2) else {
+                eprintln!("veilctl: `engine props` needs a workshop id");
+                std::process::exit(2);
+            };
+            let id = engine::marker_id(reference).unwrap_or(reference);
+            let Some(item) = engine::find(id) else {
+                eprintln!("veilctl: no wallpaper {id} in the Steam workshop folder");
+                std::process::exit(1);
+            };
+            let (cfg, _) = match Config::load() {
+                Ok(loaded) => loaded,
+                Err(error) => {
+                    eprintln!("veilctl: {error}");
+                    std::process::exit(1);
+                }
+            };
+            let Some(binary) = engine::binary(&cfg.engine.binary) else {
+                eprintln!("veilctl: linux-wallpaperengine is not installed");
+                std::process::exit(1);
+            };
+            let status = std::process::Command::new(binary)
+                .arg("--list-properties")
+                .arg(&item.dir)
+                .status();
+            match status {
+                Ok(status) if status.success() => {}
+                Ok(status) => std::process::exit(status.code().unwrap_or(1)),
+                Err(error) => {
+                    eprintln!("veilctl: {error}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        Some("status") => engine_status(),
+        Some("list") | None => {
+            let query = args.get(2).map(|s| s.to_lowercase()).unwrap_or_default();
+            let items = engine::scan_workshop();
+            if items.is_empty() {
+                println!(
+                    "no Wallpaper Engine wallpapers found; install Wallpaper Engine in Steam and subscribe to some"
+                );
+                return;
+            }
+            for item in items
+                .iter()
+                .filter(|item| query.is_empty() || item.title.to_lowercase().contains(&query))
+            {
+                let status = if item.supported {
+                    ""
+                } else {
+                    "  (unsupported)"
+                };
+                println!(
+                    "{:<12} {:<40} {:<8}{status}",
+                    item.id, item.title, item.kind
+                );
+            }
+            println!("\n{} wallpapers", items.len());
+        }
+        Some(other) => {
+            eprintln!("veilctl: unknown `engine` command `{other}`");
+            std::process::exit(2);
+        }
+    }
+}
+
+fn engine_status() {
+    use veil::engine;
+
+    let (cfg, _) = match Config::load() {
+        Ok(loaded) => loaded,
+        Err(error) => {
+            eprintln!("veilctl: {error}");
+            std::process::exit(1);
+        }
+    };
+    let binary = engine::binary(&cfg.engine.binary);
+    let assets = if cfg.engine.assets.trim().is_empty() {
+        engine::assets_dir()
+    } else {
+        Some(std::path::PathBuf::from(veil::config::expand(
+            &cfg.engine.assets,
+        )))
+    };
+    let items = engine::scan_workshop();
+    let supported = items.iter().filter(|item| item.supported).count();
+    let pid = ipc::call(&Request::Status)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("engine")
+                .and_then(|engine| engine.get("pid"))
+                .cloned()
+        })
+        .and_then(|value| value.as_u64());
+
+    println!(
+        "binary:  {}",
+        binary
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "not found (install linux-wallpaperengine-git)".into())
+    );
+    println!(
+        "assets:  {}",
+        assets
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "not found (install Wallpaper Engine in Steam)".into())
+    );
+    println!("items:   {} ({supported} supported)", items.len());
+    println!(
+        "running: {}",
+        pid.map(|pid| format!("pid {pid}"))
+            .unwrap_or_else(|| "no".into())
+    );
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let Some(command) = args.first() else {
@@ -306,6 +482,10 @@ fn main() {
         }
         "catalog" => {
             catalog_list(&args);
+            return;
+        }
+        "engine" => {
+            engine_command(&args);
             return;
         }
         "set" => {

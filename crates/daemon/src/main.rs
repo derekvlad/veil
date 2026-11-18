@@ -1,6 +1,7 @@
 //! `veild` — the wallpaper daemon.
 
 mod dbus;
+mod engine_host;
 
 use std::io::Write;
 use std::os::raw::{c_int, c_void};
@@ -188,6 +189,7 @@ fn run(config: Config, config_path: PathBuf) -> Result<(), String> {
     let qh = queue.handle();
     let registry = connection.display().get_registry(&qh, ());
     let mut app = App::new(config, config_path, egl, wl_display, qh.clone(), wake_fd);
+    let mut engine = engine_host::Host::new();
     app.registry = Some(registry);
 
     // First roundtrip collects globals, the second one delivers layer-shell
@@ -274,8 +276,11 @@ fn run(config: Config, config_path: PathBuf) -> Result<(), String> {
         }
 
         app.tick();
+        engine.sync(&app.cfg, app.engine_targets());
+        app.engine_pid = engine.running();
     }
 
+    engine.stop();
     log::info!("shutting down");
     drop(server);
     Ok(())

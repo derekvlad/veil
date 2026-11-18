@@ -192,6 +192,28 @@ impl Playlist {
     }
 }
 
+/// Wallpaper Engine playback through `linux-wallpaperengine`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct EngineSettings {
+    /// Path or name of the engine binary; empty means "look it up in PATH".
+    pub binary: String,
+    /// Wallpaper Engine's `assets` folder; empty means "find it in Steam".
+    pub assets: String,
+    /// `fill`, `fit` or `stretch`, passed straight to the engine.
+    pub scaling: String,
+}
+
+impl Default for EngineSettings {
+    fn default() -> Self {
+        Self {
+            binary: String::new(),
+            assets: String::new(),
+            scaling: "fill".into(),
+        }
+    }
+}
+
 /// Where the wallpaper catalogue ("workshop") lives.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
@@ -209,6 +231,7 @@ pub struct Config {
     pub library: Library,
     pub playlist: Playlist,
     pub catalog: CatalogSettings,
+    pub engine: EngineSettings,
     /// Per-monitor overrides: key is the wl_output name (e.g. "DP-1").
     pub outputs: BTreeMap<String, String>,
 }
@@ -265,6 +288,13 @@ items = []
 # JSON manifest of the wallpaper workshop, e.g.
 # "https://raw.githubusercontent.com/user/veil-catalog/main/catalog.json"
 url = ""
+
+[engine]
+# Wallpaper Engine scenes are played by linux-wallpaperengine, not by veil.
+# Empty `binary` looks for it in PATH, empty `assets` looks inside Steam.
+binary = ""
+assets = ""
+scaling = "fill"
 
 # [outputs]
 # "DP-1" = "/home/user/Videos/other.mp4"

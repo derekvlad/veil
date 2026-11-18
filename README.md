@@ -195,6 +195,57 @@ veilctl catalog                                         # весь катало�
 и тегам, кнопка «Установить» с индикацией уже установленного. Пустая ссылка —
 окно само предложит её ввести.
 
+## Wallpaper Engine
+
+Сцены Wallpaper Engine (`scene`) — не видео: это `scene.json` и `.pkg` с
+шейдерами, частицами и реакцией на курсор. Свой рантайм для них veil не
+содержит; такие обои играет `linux-wallpaperengine` — отдельный процесс,
+которому veil отдаёт нужные мониторы. Свои видео при этом рисует сам veil,
+поэтому на одном экране может быть видео, а на другом — сцена WE.
+
+Что работает: шейдеры и частицы, параллакс от курсора, аудио-реактивные сцены,
+свойства обоев (`--list-properties`). Свои видео и картинки при этом остаются
+на прежнем пути через mpv.
+
+Установка движка и контента:
+
+```sh
+yay -S linux-wallpaperengine-git     # или paru -S ...
+# Wallpaper Engine из Steam должен быть установлен: его папка assets нужна сценам
+```
+
+Дальше подпишитесь на обои в мастерской Steam (или откройте уже купленные):
+файлы появятся в `steamapps/workshop/content/431960/<id>`, и veil увидит их сам.
+
+```sh
+veilctl engine status                  # бинарник, assets, сколько обоев, pid
+veilctl engine list [query]            # что нашлось в мастерской
+veilctl engine apply 1845706469        # на все мониторы
+veilctl engine apply 1845706469 --output DP-1
+veilctl engine props 1845706469        # свойства сцены, если она их отдаёт
+```
+
+В GUI обои из Steam стоят в общей сетке рядом с библиотекой, с подписью
+`Wallpaper Engine · scene`; клик ставит их так же, как видео. Неподдерживаемые
+типы (`web`, `application`) видны, но неактивны.
+
+Как это устроено: `veilctl`/GUI передают демону путь-маркер `we:<id>`, демон
+хранит его в конфиге (в `[outputs]` тоже), гасит свою поверхность на этих
+экранах и держит один процесс `linux-wallpaperengine` с набором
+`--screen-root <монитор> --bg <id>`. Если движок не установлен или упал, демон
+пишет причину в лог и через 10 секунд пробует снова; остальные мониторы при
+этом продолжают работать.
+
+```toml
+[engine]
+binary = ""       # пусто — искать linux-wallpaperengine в PATH
+assets = ""       # пусто — искать в библиотеках Steam
+scaling = "fill"  # fill | fit | stretch — как движок вписывает картинку
+```
+
+Правила паузы veil (`pause_on_battery`, простой, полный экран) на экраны с WE
+не действуют: у движка свой цикл, veil его не останавливает.
+
 ## Совместимость
 
 | Окружение | Статус | Как |
@@ -241,6 +292,7 @@ crates/core     библиотека veil: EGL, mpv, layer-shell, конфиг, 
 crates/daemon   veild — фоновый демон и сервис org.veil.Veild
 crates/ctl      veilctl — управление из терминала и скриптов
 crates/gui      veil-gui — GTK4-выбор обоев
+crates/daemon (engine_host.rs) — процесс linux-wallpaperengine для сцен WE
 packaging       desktop-файл, иконка, systemd unit, PKGBUILD
 plugins         KDE-плагин и заметки про GNOME
 .github         CI: fmt, тесты и release-сборка в контейнере Arch
@@ -254,7 +306,7 @@ cargo test --workspace
 ```
 
 Тесты покрывают разбор и round-trip конфига, serde-формат IPC, выбор файлов
-плейлиста и математику span (bounding box, zoom/pan для двух экранов,
+плейлиста, разбор `project.json` и библиотек Steam, математику span (bounding box, zoom/pan для двух экранов,
 панорамный исходник, вырожденные значения). Для AUR есть
 `packaging/PKGBUILD` (пакет `veil-git`).
 
@@ -272,6 +324,9 @@ veilctl span on|off|toggle              # один кадр на все экра
 veilctl playlist on|off|toggle          # автосмена
 veilctl catalog [query] [--url URL]     # каталог-мастерская
 veilctl install <id|url> [--sha256 HEX] [--no-apply]
+veilctl engine list|status              # обои Wallpaper Engine из Steam
+veilctl engine apply <id> [--output DP-1]
+veilctl engine props <id>               # свойства сцены
 veilctl status                          # мониторы, декодер, кадры, пауза
 veilctl pause | resume | toggle
 veilctl reload                          # перечитать конфиг
@@ -330,6 +385,12 @@ items = []
 [catalog]
 # Манифест «мастерской»; пусто — окно предложит ввести ссылку
 url = "https://example.com/catalog.json"
+
+[engine]
+# Сцены Wallpaper Engine играет linux-wallpaperengine, а не veil.
+binary = ""       # пусто — искать в PATH
+assets = ""       # пусто — искать в библиотеках Steam
+scaling = "fill"
 
 [outputs]
 "HDMI-A-1" = "/home/user/Videos/second.mp4"

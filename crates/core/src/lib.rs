@@ -7,6 +7,7 @@
 pub mod catalog;
 pub mod config;
 pub mod egl;
+pub mod engine;
 pub mod ipc;
 pub mod mpv;
 pub mod span;

@@ -177,6 +177,8 @@ struct Card {
     stack: gtk::Stack,
     meta: gtk::Label,
     badge: gtk::Label,
+    /// Whether ffprobe metadata fills this card's caption.
+    probe: bool,
 }
 
 struct AppState {
@@ -1045,7 +1047,17 @@ fn rebuild_library(state: &Rc<AppState>) {
         state.cards.borrow_mut().push(card);
     }
 
-    if entries.is_empty() {
+    // Wallpaper Engine wallpapers live in Steam, so they are not files in the
+    // library; they are listed next to it and played by the external engine.
+    let engine_items = veil::engine::scan_workshop();
+    for item in &engine_items {
+        let card = build_engine_card(state, item);
+        state.flow.insert(&card.button, -1);
+        state.cards.borrow_mut().push(card);
+    }
+
+    let total = entries.len() + engine_items.len();
+    if total == 0 {
         state.content_stack.set_visible_child_name("empty");
         state
             .count_label
@@ -1054,7 +1066,7 @@ fn rebuild_library(state: &Rc<AppState>) {
         state.content_stack.set_visible_child_name("library");
         state.count_label.set_text(&format!(
             "{} · {}",
-            files_text(entries.len()),
+            files_text(total),
             t("click one to apply", "нажмите на обои, чтобы применить")
         ));
     }
@@ -1072,15 +1084,99 @@ fn rebuild_library(state: &Rc<AppState>) {
             let _ = tx.send((path.to_string_lossy().into_owned(), probe));
         });
     }
+
+    // Workshop previews go through the same poster cache as catalogue ones.
+    for item in engine_items {
+        let Some(preview) = item.preview.clone() else {
+            continue;
+        };
+        let tx = state.thumb_tx.clone();
+        let key = item.marker();
+        std::thread::spawn(move || {
+            let probe = library::Probe {
+                thumb: library::poster(&preview),
+                ..Default::default()
+            };
+            let _ = tx.send((key, probe));
+        });
+    }
+}
+
+/// What a card shows. Library files and Wallpaper Engine items share it.
+struct CardSpec {
+    path: String,
+    name: String,
+    /// Caption before any probe arrives.
+    kind: String,
+    /// Whether ffprobe metadata replaces the caption (library files only).
+    probe: bool,
+    /// Whether the wallpaper is a video (drives the placeholder icon).
+    video: bool,
+    /// Whether the card can be pinned to the playlist and removed.
+    removable: bool,
+    /// Unsupported Wallpaper Engine kinds stay visible but cannot be applied.
+    enabled: bool,
 }
 
 fn build_card(state: &Rc<AppState>, entry: &library::Entry) -> Card {
+    build_spec_card(
+        state,
+        CardSpec {
+            path: entry.path.to_string_lossy().into_owned(),
+            name: entry.name.clone(),
+            kind: if entry.video {
+                t("Video", "Видео")
+            } else {
+                t("Image", "Фото")
+            }
+            .to_string(),
+            probe: true,
+            video: entry.video,
+            removable: true,
+            enabled: true,
+        },
+    )
+}
+
+/// A wallpaper that lives in Steam and is drawn by the external engine.
+fn build_engine_card(state: &Rc<AppState>, item: &veil::engine::Item) -> Card {
+    let kind = if item.kind.is_empty() {
+        t("unknown type", "неизвестный тип").to_string()
+    } else {
+        item.kind.clone()
+    };
+    let kind = if item.supported {
+        format!("Wallpaper Engine · {kind}")
+    } else {
+        format!(
+            "Wallpaper Engine · {kind} · {}",
+            t("not supported", "не поддерживается")
+        )
+    };
+    build_spec_card(
+        state,
+        CardSpec {
+            path: item.marker(),
+            name: item.title.clone(),
+            kind,
+            probe: false,
+            video: false,
+            removable: false,
+            enabled: item.supported,
+        },
+    )
+}
+
+fn build_spec_card(state: &Rc<AppState>, spec: CardSpec) -> Card {
     let picture = gtk::Picture::new();
     picture.set_can_shrink(true);
     picture.set_content_fit(gtk::ContentFit::Cover);
     picture.add_css_class("thumb");
 
-    let icon = gtk::Image::from_icon_name(if entry.video {
+    let engine = veil::engine::marker_id(&spec.path).is_some();
+    let icon = gtk::Image::from_icon_name(if engine {
+        "applications-games-symbolic"
+    } else if spec.video {
         "video-x-generic-symbolic"
     } else {
         "image-x-generic-symbolic"
@@ -1106,18 +1202,14 @@ fn build_card(state: &Rc<AppState>, entry: &library::Entry) -> Card {
     overlay.set_child(Some(&stack));
     overlay.add_overlay(&badge);
 
-    let name_label = gtk::Label::new(Some(&entry.name));
+    let name_label = gtk::Label::new(Some(&spec.name));
     name_label.add_css_class("wallpaper-name");
     name_label.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
     name_label.set_max_width_chars(26);
     name_label.set_xalign(0.0);
     name_label.set_width_chars(1);
 
-    let meta = gtk::Label::new(Some(if entry.video {
-        t("Video", "Видео")
-    } else {
-        t("Image", "Фото")
-    }));
+    let meta = gtk::Label::new(Some(&spec.kind));
     meta.add_css_class("caption");
     meta.add_css_class("dim-label");
     meta.set_xalign(0.0);
@@ -1130,21 +1222,52 @@ fn build_card(state: &Rc<AppState>, entry: &library::Entry) -> Card {
 
     let button = gtk::Button::builder().child(&body).has_frame(false).build();
     button.add_css_class("wallpaper-card");
-    button.set_tooltip_text(Some(t(
-        "Click to set as wallpaper · right click to remove",
-        "Нажмите, чтобы поставить · правый клик — удалить",
-    )));
+    button.set_tooltip_text(Some(if spec.removable {
+        t(
+            "Click to set as wallpaper · right click to remove",
+            "Нажмите, чтобы поставить · правый клик — удалить",
+        )
+    } else {
+        t(
+            "Wallpaper Engine scene: click to paint it",
+            "Сцена Wallpaper Engine: нажмите, чтобы поставить",
+        )
+    }));
+    button.set_sensitive(spec.enabled);
 
-    let path = entry.path.to_string_lossy().into_owned();
+    let path = spec.path.clone();
     button.connect_clicked({
         let weak = Rc::downgrade(state);
         let path = path.clone();
         move |_| {
-            if let Some(state) = weak.upgrade() {
-                apply_wallpaper(&state, Path::new(&path));
+            let Some(state) = weak.upgrade() else {
+                return;
+            };
+            if veil::engine::marker_id(&path).is_some()
+                && veil::engine::binary(&state.cfg.borrow().engine.binary).is_none()
+            {
+                state.toast(t(
+                    "The engine is not installed: yay -S linux-wallpaperengine-git",
+                    "Движок не установлен: yay -S linux-wallpaperengine-git",
+                ));
+                return;
             }
+            apply_wallpaper(&state, Path::new(&path));
         }
     });
+
+    if !spec.removable {
+        return Card {
+            path,
+            name: spec.name,
+            button,
+            picture,
+            stack,
+            meta,
+            badge,
+            probe: spec.probe,
+        };
+    }
 
     // Right click: pin to the playlist or remove from the library.
     let popover = gtk::Popover::new();
@@ -1220,12 +1343,13 @@ fn build_card(state: &Rc<AppState>, entry: &library::Entry) -> Card {
 
     Card {
         path,
-        name: entry.name.clone(),
+        name: spec.name,
         button,
         picture,
         stack,
         meta,
         badge,
+        probe: spec.probe,
     }
 }
 
@@ -1238,10 +1362,13 @@ fn apply_probe(state: &AppState, path: &str, probe: &library::Probe) {
     if let Some(thumb) = &probe.thumb {
         card.picture.set_filename(Some(thumb));
         card.stack.set_visible_child_name("thumb");
-    } else if !probe.video {
+    } else if !probe.video && card.probe {
         // Poster generation failed; stills can be decoded by GTK directly.
         card.picture.set_filename(Some(path));
         card.stack.set_visible_child_name("thumb");
+    }
+    if !card.probe {
+        return;
     }
 
     let kind = if probe.video {
@@ -1526,6 +1653,8 @@ fn sync_monitor_rows(state: &Rc<AppState>, outputs: &[serde_json::Value]) {
         title.add_css_class("caption");
         let display_name = if path.is_empty() {
             "—".to_string()
+        } else if let Some(id) = veil::engine::marker_id(path) {
+            format!("Wallpaper Engine · {id}")
         } else {
             file_name(Path::new(path))
         };
@@ -1633,7 +1762,12 @@ fn apply_wallpaper(state: &Rc<AppState>, path: &Path) {
         output: target.clone(),
         clear_outputs: target.is_none(),
     };
-    let name = file_name(path);
+    let name = match veil::engine::marker_id(&path_str) {
+        Some(id) => veil::engine::find(id)
+            .map(|item| item.title)
+            .unwrap_or_else(|| format!("Wallpaper Engine · {id}")),
+        None => file_name(path),
+    };
     match ipc::call(&request) {
         Ok(_) => {
             let where_to = target.unwrap_or_else(|| t("all monitors", "все экраны").to_string());

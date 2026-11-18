@@ -14,6 +14,7 @@ arch=('x86_64' 'aarch64')
 url="https://github.com/veil-wallpaper/veil"
 license=('MIT')
 depends=('mpv' 'libglvnd' 'gtk4' 'libadwaita')
+optdepends=('linux-wallpaperengine-git: Wallpaper Engine scenes')
 makedepends=('cargo' 'rust' 'pkgconf')
 provides=('veil')
 conflicts=('veil')
