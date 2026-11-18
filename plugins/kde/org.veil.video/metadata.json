@@ -1,0 +1,28 @@
+{
+    "KPackageStructure": "Plasma/Wallpaper",
+    "KPlugin": {
+        "Authors": [
+            {
+                "Name": "veil"
+            }
+        ],
+        "Category": "",
+        "Description": "Video wallpaper with hardware decoding",
+        "Description[ru]": "Видеообои с аппаратным декодированием",
+        "Icon": "preferences-desktop-wallpaper",
+        "Id": "org.veil.video",
+        "License": "MIT",
+        "Name": "Veil Video",
+        "Name[ru]": "Veil Видео",
+        "Website": ""
+    },
+    "Keywords": "video, wallpaper, mp4, webm",
+    "MimeType": "video/mp4;video/webm;video/x-matroska;video/quicktime;",
+    "X-KDE-ParentApp": "org.kde.plasmashell",
+    "X-Plasma-DropMimeTypes": [
+        "video/mp4",
+        "video/webm",
+        "video/x-matroska",
+        "video/quicktime"
+    ]
+}

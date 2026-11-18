@@ -1,0 +1,19 @@
+[Unit]
+Description=veil video wallpaper daemon
+Documentation=https://example.invalid/veil
+PartOf=graphical-session.target
+After=graphical-session.target
+ConditionEnvironment=WAYLAND_DISPLAY
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/veild
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=2
+# A wallpaper daemon has no business competing with games for CPU.
+Nice=10
+IOSchedulingClass=idle
+
+[Install]
+WantedBy=graphical-session.target
