@@ -518,7 +518,7 @@ scale_filter = "lanczos"
 fps_limit = 0          # 0 = как в видео; 30 экономит upload/композитинг
 vsync = false          # true — ровнее на одном мониторе
 flip_y = true          # GL-путь пишет кадр снизу вверх; false — если перевёрнуто
-mute = true
+mute = true            # видео без звука; звук сцен WE — это [engine] audio
 
 [rules]
 pause_on_fullscreen = true
@@ -549,6 +549,8 @@ url = "https://example.com/catalog.json"
 binary = ""       # пусто — искать в PATH
 assets = ""       # пусто — искать в библиотеках Steam
 scaling = "fill"
+audio = false     # true — разрешить звук сцен (по умолчанию глухо)
+preload = ""      # libcef.so для web-обоев: пусто — найти, "none" — не грузить
 
 # Виджеты: рисует veil-widgets поверх обоев, под окнами.
 [[widgets]]
