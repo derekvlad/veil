@@ -1,5 +1,6 @@
 //! `veilctl` — control client for `veild`.
 
+use veil::catalog::{self, Catalog};
 use veil::config::{Config, Mode};
 use veil::ipc::{self, Request};
 
@@ -17,6 +18,10 @@ fn usage() {
          \x20 veilctl clear [--output DP-1]      drop per-monitor overrides\n\
          \x20 veilctl span on|off|toggle         spread one picture over all monitors\n\
          \x20 veilctl playlist on|off|toggle     start or stop the rotation\n\
+         \x20 veilctl install <id|url> [--sha256 HEX] [--no-apply]\n\
+         \x20                                    download from the workshop\n\
+         \x20 veilctl catalog [query] [--url URL]\n\
+         \x20                                    list the workshop catalogue\n\
          \x20 veilctl reload                     re-read the config file\n\
          \x20 veilctl quit                       stop the daemon\n\
          \n\
@@ -77,6 +82,178 @@ fn update_config(change: impl FnOnce(&mut Config)) {
     }
 }
 
+fn human_size(bytes: u64) -> String {
+    if bytes == 0 {
+        return "—".into();
+    }
+    let mb = bytes as f64 / (1024.0 * 1024.0);
+    if mb >= 1024.0 {
+        format!("{:.1} GiB", mb / 1024.0)
+    } else {
+        format!("{mb:.1} MiB")
+    }
+}
+
+fn install(args: &[String]) {
+    let Some(reference) = args.get(1) else {
+        eprintln!("veilctl: `install` needs an id from the catalogue or an http(s) URL");
+        std::process::exit(2);
+    };
+    let mut sha256: Option<String> = None;
+    let mut apply = true;
+    let mut output: Option<String> = None;
+    let mut index = 2;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--sha256" => {
+                sha256 = args.get(index + 1).cloned();
+                if sha256.is_none() {
+                    eprintln!("veilctl: `--sha256` needs a hex digest");
+                    std::process::exit(2);
+                }
+                index += 2;
+            }
+            "--no-apply" => {
+                apply = false;
+                index += 1;
+            }
+            "--output" | "-o" => {
+                output = args.get(index + 1).cloned();
+                index += 2;
+            }
+            other => {
+                eprintln!("veilctl: unknown option `{other}`");
+                std::process::exit(2);
+            }
+        }
+    }
+
+    let (cfg, _) = match Config::load() {
+        Ok(loaded) => loaded,
+        Err(error) => {
+            eprintln!("veilctl: {error}");
+            std::process::exit(1);
+        }
+    };
+    let dir = cfg.library_path();
+    let direct = reference.starts_with("https://") || reference.starts_with("http://");
+    println!("→ {reference}");
+
+    if direct && sha256.is_none() {
+        eprintln!("warning: no --sha256 given, the download is not verified");
+    }
+    let result = if direct {
+        catalog::install(reference, sha256.as_deref(), &dir)
+    } else {
+        catalog::install_reference(reference, &cfg.catalog.url, &dir)
+    };
+
+    let path = match result {
+        Ok(path) => path,
+        Err(error) => {
+            eprintln!("veilctl: {error}");
+            std::process::exit(1);
+        }
+    };
+    println!("{}", path.display());
+
+    if apply {
+        let request = Request::Set {
+            path: Some(path.to_string_lossy().into_owned()),
+            mode: None,
+            output: output.clone(),
+            clear_outputs: false,
+        };
+        match ipc::call(&request) {
+            Ok(_) => println!("applied"),
+            Err(_) => println!("saved; the daemon is not running"),
+        }
+    }
+}
+
+fn catalog_list(args: &[String]) {
+    let mut query = String::new();
+    let mut url: Option<String> = None;
+    let mut index = 1;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--url" => {
+                url = args.get(index + 1).cloned();
+                if url.is_none() {
+                    eprintln!("veilctl: `--url` needs a URL");
+                    std::process::exit(2);
+                }
+                index += 2;
+            }
+            other if other.starts_with('-') => {
+                eprintln!("veilctl: unknown option `{other}`");
+                std::process::exit(2);
+            }
+            other => {
+                query = other.to_string();
+                index += 1;
+            }
+        }
+    }
+
+    let (mut cfg, path) = match Config::load() {
+        Ok(loaded) => loaded,
+        Err(error) => {
+            eprintln!("veilctl: {error}");
+            std::process::exit(1);
+        }
+    };
+    if let Some(url) = url {
+        cfg.catalog.url = url;
+        if let Err(error) = cfg.save_to(&path) {
+            eprintln!("veilctl: {error}");
+            std::process::exit(1);
+        }
+        println!("{}", path.display());
+    }
+    if cfg.catalog.url.is_empty() {
+        eprintln!("veilctl: no catalogue URL; pass `--url <manifest.json>` once");
+        std::process::exit(2);
+    }
+
+    let text = match catalog::fetch_text(&cfg.catalog.url) {
+        Ok(text) => text,
+        Err(error) => {
+            eprintln!("veilctl: {error}");
+            std::process::exit(1);
+        }
+    };
+    let catalog = match Catalog::parse(&text) {
+        Ok(catalog) => catalog,
+        Err(error) => {
+            eprintln!("veilctl: {error}");
+            std::process::exit(1);
+        }
+    };
+
+    let entries = catalog.search(&query);
+    if entries.is_empty() {
+        println!("nothing matches `{query}`");
+        return;
+    }
+    for entry in entries {
+        let tags = if entry.tags.is_empty() {
+            String::new()
+        } else {
+            format!("  [{}]", entry.tags.join(", "))
+        };
+        println!(
+            "{:<24} {:<32} {:<16} {}{}",
+            entry.id,
+            entry.title,
+            entry.author,
+            human_size(entry.size),
+            tags
+        );
+    }
+    println!("\n{} entries in {}", catalog.entries.len(), cfg.catalog.url);
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let Some(command) = args.first() else {
@@ -121,6 +298,14 @@ fn main() {
                     .unwrap_or(false),
             );
             update_config(|cfg| cfg.playlist.enabled = enabled);
+            return;
+        }
+        "install" => {
+            install(&args);
+            return;
+        }
+        "catalog" => {
+            catalog_list(&args);
             return;
         }
         "set" => {

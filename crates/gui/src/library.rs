@@ -126,7 +126,7 @@ pub fn probe(path: &Path, video: bool) -> Probe {
     probe
 }
 
-fn poster(path: &Path) -> Option<PathBuf> {
+pub fn poster(path: &Path) -> Option<PathBuf> {
     let dir = cache_dir();
     std::fs::create_dir_all(&dir).ok()?;
     let target = dir.join(format!("{:016x}.jpg", cache_key(path)));
@@ -135,13 +135,27 @@ fn poster(path: &Path) -> Option<PathBuf> {
     }
 
     // Take a frame a bit into the clip so that intros are skipped, and fall
-    // back to the very first frame for very short clips.
-    for offset in ["1.5", "0"] {
-        let status = Command::new("ffmpeg")
-            .args(["-nostdin", "-y", "-v", "error", "-ss", offset, "-i"])
+    // back to the very first frame for very short clips. Still images must not
+    // be seeked at all: `-ss` on a one-frame input yields no output.
+    let is_video = path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| VIDEO_EXT.contains(&ext.to_ascii_lowercase().as_str()))
+        .unwrap_or(false);
+    let offsets: &[&str] = if is_video { &["1.5", ""] } else { &[""] };
+    for offset in offsets {
+        let mut command = Command::new("ffmpeg");
+        command.args(["-nostdin", "-y", "-v", "error"]);
+        if !offset.is_empty() {
+            command.args(["-ss", offset]);
+        }
+        let status = command
+            .arg("-i")
             .arg(path)
             .args([
                 "-frames:v",
+                "1",
+                "-update",
                 "1",
                 "-vf",
                 "scale=240:135:force_original_aspect_ratio=increase,crop=240:135",

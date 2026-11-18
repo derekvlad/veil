@@ -4,6 +4,7 @@
 //! any desktop that can run the daemon, from niri to KDE and GNOME.
 
 mod library;
+mod workshop;
 
 use std::cell::{Cell, RefCell};
 use std::path::{Path, PathBuf};
@@ -25,8 +26,25 @@ const APP_ID: &str = "org.veil.Veil";
 
 const MODES: [Mode; 4] = [Mode::Fill, Mode::Fit, Mode::Stretch, Mode::Center];
 
+/// Set by `--workshop`, read when the main window is built.
+static OPEN_WORKSHOP: OnceLock<bool> = OnceLock::new();
+
 fn main() -> glib::ExitCode {
     let app = adw::Application::builder().application_id(APP_ID).build();
+    app.add_main_option(
+        "workshop",
+        glib::Char::from(b'w'),
+        glib::OptionFlags::NONE,
+        glib::OptionArg::None,
+        "Open the wallpaper workshop",
+        None,
+    );
+    app.connect_handle_local_options(|_, options| {
+        if options.contains("workshop") {
+            let _ = OPEN_WORKSHOP.set(true);
+        }
+        std::ops::ControlFlow::Continue(())
+    });
     app.connect_startup(|_| load_css());
     app.connect_activate(build_window);
     app.run()
@@ -208,6 +226,32 @@ impl AppState {
         }
     }
 
+    fn notify(&self, message: &str) {
+        self.toast(message);
+    }
+
+    fn library_dir(&self) -> PathBuf {
+        self.cfg.borrow().library_path()
+    }
+
+    fn preview_cache_dir(&self) -> PathBuf {
+        veil::config::cache_dir()
+    }
+
+    fn catalog_url(&self) -> String {
+        self.cfg.borrow().catalog.url.clone()
+    }
+
+    fn save_catalog_url(&self, url: &str) {
+        self.cfg.borrow_mut().catalog.url = url.to_string();
+        self.save_config();
+    }
+
+    fn refresh_library(self: &Rc<Self>) {
+        rebuild_library(self);
+        update_playlist_label(self);
+    }
+
     /// Persist settings and let the daemon re-read the file.
     fn push_settings(&self) {
         self.save_config();
@@ -247,6 +291,11 @@ fn build_window(app: &adw::Application) {
     title.add_css_class("title");
     header.set_title_widget(Some(&title));
 
+    let workshop_button = gtk::Button::from_icon_name("system-software-install-symbolic");
+    workshop_button.add_css_class("flat");
+    workshop_button.set_tooltip_text(Some(t("Wallpaper workshop", "Мастерская обоев")));
+    header.pack_end(&workshop_button);
+
     let pause_button = gtk::Button::from_icon_name("media-playback-pause-symbolic");
     pause_button.add_css_class("flat");
     pause_button.set_tooltip_text(Some(t("Pause / resume", "Пауза / продолжить")));
@@ -272,6 +321,10 @@ fn build_window(app: &adw::Application) {
     menu.append(
         Some(t("Open configuration", "Открыть конфигурацию")),
         Some("win.config"),
+    );
+    menu.append(
+        Some(t("Wallpaper workshop…", "Мастерская обоев…")),
+        Some("win.workshop"),
     );
     menu.append(Some(t("About veil", "О программе")), Some("win.about"));
     menu.append(Some(t("Quit", "Выход")), Some("app.quit"));
@@ -649,6 +702,13 @@ fn build_window(app: &adw::Application) {
     });
     window.add_action(&config_action);
 
+    let workshop_action = gio::SimpleAction::new("workshop", None);
+    workshop_action.connect_activate({
+        let state = state.clone();
+        move |_, _| workshop::open(&state)
+    });
+    window.add_action(&workshop_action);
+
     let about = gio::SimpleAction::new("about", None);
     about.connect_activate({
         let state = state.clone();
@@ -664,6 +724,7 @@ fn build_window(app: &adw::Application) {
     app.add_action(&quit);
 
     app.set_accels_for_action("win.refresh", &["F5"]);
+    app.set_accels_for_action("win.workshop", &["<Control>w"]);
     app.set_accels_for_action("app.quit", &["<Control>q"]);
 
     // --------------------------------------------------------------- behaviour
@@ -698,6 +759,14 @@ fn build_window(app: &adw::Application) {
             Err(error) => state.toast(&error),
         }
     });
+    workshop_button.connect_clicked({
+        let state = state.clone();
+        move |_| workshop::open(&state)
+    });
+    if OPEN_WORKSHOP.get().copied().unwrap_or(false) {
+        let state = state.clone();
+        glib::idle_add_local_once(move || workshop::open(&state));
+    }
     state.pause_button.connect_clicked({
         let state = state.clone();
         move |_| {

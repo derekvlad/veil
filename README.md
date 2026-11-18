@@ -73,6 +73,7 @@ niri, и в KDE, и в GNOME:
   (файл уходит в корзину);
 * переключатели «без звука», пауза в фуллскрине/при простое/от батареи и
   таймаут простоя;
+* «Мастерская» — окно с каталогом обоев: поиск, превью, установка в один клик;
 * случайные обои, поиск по библиотеке, статус демона и кнопка его запуска;
 * всё, что меняется в окне, сразу пишется в `~/.config/veil/config.toml`.
 
@@ -143,6 +144,56 @@ right = "exec veil-gui"
 
 После правки — `noctalia config validate && noctalia msg config-reload`.
 
+
+## Мастерская (каталог обоев)
+
+Своего Steam Workshop у veil нет и не нужно: каталог — это обычный JSON-файл на
+любом статическом хостинге (raw.githubusercontent.com, GitLab Pages, свой
+nginx). Один раз укажите ссылку, дальше обои ставятся из окна.
+
+```sh
+veilctl catalog --url https://example.com/catalog.json   # запомнить каталог
+veilctl catalog cyberpunk                               # список и поиск
+veilctl install neon-city                               # скачать и применить
+veilctl install https://example.com/clip.mp4 --sha256 <hex>   # прямая ссылка
+veilctl catalog                                         # весь каталог
+```
+
+Формат (пример — `docs/catalog.example.json`):
+
+```json
+{
+  "version": 1,
+  "entries": [
+    {
+      "id": "neon-city",
+      "title": "Neon City",
+      "author": "derek",
+      "kind": "video",
+      "description": "Ночной город под дождём, 4K",
+      "tags": ["cyberpunk", "4k"],
+      "preview": "https://example.com/neon-city.jpg",
+      "url": "https://example.com/neon-city.mp4",
+      "sha256": "0123…cdef",
+      "size": 52428800,
+      "license": "CC0"
+    }
+  ]
+}
+```
+
+`id` — только `a-z`, цифры, `-`, `_`; `sha256` обязателен для записей каталога.
+Загрузка идёт в `.<pid>.<имя>.part`, файл попадает в библиотеку только после
+совпадения хеша, поэтому битая или подменённая загрузка не остаётся в папке.
+Лимиты: 8 ГиБ на обои, 4 МиБ на манифест, 16 МиБ на превью; архивы не
+распаковываются — только видео и картинки, так что zip-slip невозможен.
+Превью кэшируются в `~/.cache/veil` и пережимаются тем же `ffmpeg`, что и
+постеры библиотеки.
+
+В GUI это кнопка с иконкой установки в шапке (или `veil-gui --workshop`):
+сетка карточек с превью, автором, тегами и размером, поиск по названию, автору
+и тегам, кнопка «Установить» с индикацией уже установленного. Пустая ссылка —
+окно само предложит её ввести.
 
 ## Совместимость
 
@@ -219,6 +270,8 @@ veilctl random [--output DP-1]          # случайное из плейлис
 veilctl clear [--output DP-1]           # снять индивидуальные обои
 veilctl span on|off|toggle              # один кадр на все экраны
 veilctl playlist on|off|toggle          # автосмена
+veilctl catalog [query] [--url URL]     # каталог-мастерская
+veilctl install <id|url> [--sha256 HEX] [--no-apply]
 veilctl status                          # мониторы, декодер, кадры, пауза
 veilctl pause | resume | toggle
 veilctl reload                          # перечитать конфиг
@@ -273,6 +326,10 @@ items = []
 
 [playlist.outputs]
 # "DP-1" = ["/home/user/Videos/left.mp4"]
+
+[catalog]
+# Манифест «мастерской»; пусто — окно предложит ввести ссылку
+url = "https://example.com/catalog.json"
 
 [outputs]
 "HDMI-A-1" = "/home/user/Videos/second.mp4"

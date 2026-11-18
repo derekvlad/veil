@@ -4,6 +4,7 @@
 //! libmpv to render frames straight into an EGL window. The control client
 //! (`veilctl`) talks to it over a Unix socket.
 
+pub mod catalog;
 pub mod config;
 pub mod egl;
 pub mod ipc;

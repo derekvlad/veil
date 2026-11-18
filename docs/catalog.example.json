@@ -1,0 +1,31 @@
+{
+  "version": 1,
+  "entries": [
+    {
+      "id": "neon-city",
+      "title": "Neon City",
+      "author": "derek",
+      "kind": "video",
+      "description": "Night city in the rain, 4K loop.",
+      "tags": ["cyberpunk", "rain", "4k"],
+      "preview": "https://example.com/neon-city.jpg",
+      "url": "https://example.com/neon-city.mp4",
+      "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "size": 52428800,
+      "license": "CC0"
+    },
+    {
+      "id": "forest-mist",
+      "title": "Forest Mist",
+      "author": "someone-else",
+      "kind": "image",
+      "description": "Quiet morning fog between the trees.",
+      "tags": ["nature", "calm", "1440p"],
+      "preview": "https://example.com/forest-mist.jpg",
+      "url": "https://example.com/forest-mist.png",
+      "sha256": "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210",
+      "size": 8388608,
+      "license": "CC BY 4.0"
+    }
+  ]
+}

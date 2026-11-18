@@ -192,6 +192,14 @@ impl Playlist {
     }
 }
 
+/// Where the wallpaper catalogue ("workshop") lives.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct CatalogSettings {
+    /// URL of the JSON manifest. Empty disables the workshop window.
+    pub url: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct Config {
@@ -200,6 +208,7 @@ pub struct Config {
     pub rules: Rules,
     pub library: Library,
     pub playlist: Playlist,
+    pub catalog: CatalogSettings,
     /// Per-monitor overrides: key is the wl_output name (e.g. "DP-1").
     pub outputs: BTreeMap<String, String>,
 }
@@ -252,6 +261,11 @@ items = []
 [playlist.outputs]
 # "DP-1" = ["/home/user/Videos/left.mp4", "/home/user/Videos/left2.mp4"]
 
+[catalog]
+# JSON manifest of the wallpaper workshop, e.g.
+# "https://raw.githubusercontent.com/user/veil-catalog/main/catalog.json"
+url = ""
+
 # [outputs]
 # "DP-1" = "/home/user/Videos/other.mp4"
 "##;
@@ -301,6 +315,15 @@ pub fn expand(path: &str) -> String {
         }
     }
     path.to_string()
+}
+
+/// Where previews and other throwaway files live.
+pub fn cache_dir() -> PathBuf {
+    let base = std::env::var_os("XDG_CACHE_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))
+        .unwrap_or_else(|| PathBuf::from("."));
+    base.join("veil")
 }
 
 pub fn config_path() -> PathBuf {
@@ -443,6 +466,7 @@ mod tests {
         let mut cfg = Config::default();
         cfg.wallpaper.path = "/tmp/a.mp4".into();
         cfg.wallpaper.span = true;
+        cfg.catalog.url = "https://example.com/catalog.json".into();
         cfg.playlist.enabled = true;
         cfg.playlist.interval_secs = 42;
         cfg.playlist.items = vec!["/tmp/b.mp4".into()];
@@ -455,6 +479,7 @@ mod tests {
         cfg.save_to(&path).unwrap();
         let (loaded, _) = Config::load_from(&path).unwrap();
         assert!(loaded.wallpaper.span);
+        assert_eq!(loaded.catalog.url, "https://example.com/catalog.json");
         assert_eq!(loaded.playlist.interval_secs, 42);
         assert_eq!(loaded.playlist.outputs["DP-1"], ["/tmp/c.mp4"]);
         let _ = fs::remove_dir_all(&dir);
