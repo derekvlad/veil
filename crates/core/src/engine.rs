@@ -10,6 +10,7 @@
 //! this module spawns processes — the daemon owns the child.
 
 use serde::Deserialize;
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -270,7 +271,12 @@ pub struct Target {
 }
 
 /// Build the command line that paints `targets` with the engine.
-pub fn arguments(targets: &[Target], assets: Option<&Path>, scaling: &str) -> Vec<String> {
+pub fn arguments(
+    targets: &[Target],
+    assets: Option<&Path>,
+    scaling: &str,
+    properties: &BTreeMap<String, String>,
+) -> Vec<String> {
     let mut args = Vec::new();
     if let Some(assets) = assets {
         args.push("--assets-dir".into());
@@ -278,6 +284,12 @@ pub fn arguments(targets: &[Target], assets: Option<&Path>, scaling: &str) -> Ve
     }
     args.push("--scaling".into());
     args.push(scaling.to_string());
+    for (key, value) in properties {
+        // The engine silently ignores unknown keys, so a value left over from
+        // another scene is harmless.
+        args.push("--set-property".into());
+        args.push(format!("{key}={value}"));
+    }
     for target in targets {
         args.push("--screen-root".into());
         args.push(target.screen.clone());
@@ -285,6 +297,295 @@ pub fn arguments(targets: &[Target], assets: Option<&Path>, scaling: &str) -> Ve
         args.push(target.id.clone());
     }
     args
+}
+
+// ----------------------------------------------------------------- properties
+
+/// What kind of control a scene setting wants.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PropertyKind {
+    Boolean,
+    /// One of the keys listed in [`Property::options`].
+    Combo,
+    Slider,
+    /// `R,G,B,A` with every component from 0 to 255.
+    Color,
+    Text,
+    File,
+    SceneTexture,
+    /// A kind this version of veil does not know; shown read-only.
+    Unknown,
+}
+
+impl PropertyKind {
+    fn parse(text: &str) -> Self {
+        match text {
+            "boolean" => Self::Boolean,
+            "combo" => Self::Combo,
+            "slider" => Self::Slider,
+            "color" => Self::Color,
+            "text" => Self::Text,
+            "file" => Self::File,
+            "scene texture" => Self::SceneTexture,
+            "textinput" => Self::Text,
+            _ => Self::Unknown,
+        }
+    }
+
+    /// Whether the value is free-form enough to be worth an entry.
+    pub fn is_textual(self) -> bool {
+        matches!(self, Self::Text | Self::File | Self::SceneTexture)
+    }
+}
+
+/// One entry of `--list-properties`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Property {
+    /// The key passed to `--set-property`, e.g. `clock`.
+    pub key: String,
+    pub kind: PropertyKind,
+    /// Human text from the wallpaper, possibly a translation key.
+    pub label: String,
+    /// Value in the form the engine accepts it back.
+    pub value: String,
+    /// What the scene itself declares, before any override.
+    pub default: String,
+    pub min: f64,
+    pub max: f64,
+    pub step: f64,
+    /// `(key, label)` pairs of a combo box.
+    pub options: Vec<(String, String)>,
+}
+
+impl Property {
+    /// A label fit for a Russian or English window.
+    pub fn title(&self) -> String {
+        let label = self.label.trim();
+        // Wallpaper Engine uses translation keys for some built-in settings.
+        if label.is_empty() || label.starts_with("ui_") {
+            return self.key.clone();
+        }
+        label.to_string()
+    }
+
+    /// The value shown as the default, for "reset to the scene's own".
+    pub fn default_value(&self) -> String {
+        self.default.clone()
+    }
+
+    /// Turn what a user typed into the string `--set-property` expects.
+    ///
+    /// The engine is forgiving in odd ways (colours are four floats from its
+    /// own dump, but `R,G,B,A` from the command line), so every value a person
+    /// can enter is normalised here rather than trusted as typed.
+    pub fn normalize(&self, raw: &str) -> Result<String, String> {
+        let raw = raw.trim();
+        match self.kind {
+            PropertyKind::Boolean => match raw.to_ascii_lowercase().as_str() {
+                "1" | "on" | "true" | "yes" => Ok(bool_value(true)),
+                "0" | "off" | "false" | "no" => Ok(bool_value(false)),
+                _ => Err(format!("`{raw}` is not on or off")),
+            },
+            PropertyKind::Color => normalize_color(raw),
+            PropertyKind::Combo => {
+                if self.options.iter().any(|(key, _)| key == raw) {
+                    return Ok(raw.to_string());
+                }
+                if let Some((key, _)) = self
+                    .options
+                    .iter()
+                    .find(|(_, label)| label.eq_ignore_ascii_case(raw))
+                {
+                    return Ok(key.clone());
+                }
+                let known: Vec<String> = self
+                    .options
+                    .iter()
+                    .map(|(key, label)| format!("{key} = {label}"))
+                    .collect();
+                Err(format!("`{raw}` is not one of: {}", known.join(", ")))
+            }
+            PropertyKind::Slider => {
+                let value: f64 = raw
+                    .parse()
+                    .map_err(|_| format!("`{raw}` is not a number"))?;
+                let value = value.clamp(self.min, self.max);
+                Ok(number_value(value, self.step))
+            }
+            _ => Ok(raw.to_string()),
+        }
+    }
+}
+
+/// `R,G,B,A`, `#rgb`, `#rrggbb` or `#rrggbbaa` as the engine wants it.
+fn normalize_color(raw: &str) -> Result<String, String> {
+    let Some(hex) = raw.strip_prefix('#') else {
+        let parts: Vec<&str> = raw.split(',').collect();
+        if parts.len() != 4 {
+            return Err(format!("expected `R,G,B,A`, got `{raw}`"));
+        }
+        let mut components = [0u8; 4];
+        for (slot, part) in components.iter_mut().zip(parts) {
+            *slot = part
+                .trim()
+                .parse()
+                .map_err(|_| format!("`{part}` is not a number from 0 to 255"))?;
+        }
+        return Ok(color_value(components));
+    };
+
+    let digits: Vec<u8> = hex
+        .chars()
+        .map(|c| c.to_digit(16).map(|digit| digit as u8))
+        .collect::<Option<_>>()
+        .ok_or_else(|| format!("`{raw}` is not a hex colour"))?;
+    let pair = |high: u8, low: u8| high * 16 + low;
+    let single = |value: u8| value * 17;
+    let components = match digits[..] {
+        [r, g, b] => [single(r), single(g), single(b), 255],
+        [r, g, b, a] => [single(r), single(g), single(b), single(a)],
+        [r1, r2, g1, g2, b1, b2] => [pair(r1, r2), pair(g1, g2), pair(b1, b2), 255],
+        [r1, r2, g1, g2, b1, b2, a1, a2] => {
+            [pair(r1, r2), pair(g1, g2), pair(b1, b2), pair(a1, a2)]
+        }
+        _ => return Err(format!("`{raw}` is not a hex colour")),
+    };
+    Ok(color_value(components))
+}
+
+/// Parse the output of `linux-wallpaperengine --list-properties`.
+pub fn parse_properties(text: &str) -> Vec<Property> {
+    let mut properties: Vec<Property> = Vec::new();
+    let mut current: Option<Property> = None;
+    let mut in_values = false;
+
+    for line in text.lines() {
+        let line = line.trim_end();
+        // `Values:` sits at the left margin too, but starts the option list.
+        if line.trim() == "Values:" && current.is_some() {
+            in_values = true;
+            continue;
+        }
+        // A header line is not indented: `clock - boolean`.
+        if !line.starts_with(' ') && !line.starts_with('\t') && !line.trim().is_empty() {
+            if let Some(done) = current.take() {
+                properties.push(done);
+            }
+            in_values = false;
+            let Some((key, kind)) = line.rsplit_once(" - ") else {
+                continue;
+            };
+            current = Some(Property {
+                key: key.trim().to_string(),
+                kind: PropertyKind::parse(kind.trim()),
+                label: String::new(),
+                value: String::new(),
+                default: String::new(),
+                min: 0.0,
+                max: 1.0,
+                step: 0.01,
+                options: Vec::new(),
+            });
+            continue;
+        }
+
+        let Some(property) = current.as_mut() else {
+            continue;
+        };
+        let trimmed = line.trim();
+        if trimmed == "Values:" {
+            in_values = true;
+            continue;
+        }
+        if in_values {
+            if let Some((key, label)) = trimmed.split_once(" = ") {
+                property
+                    .options
+                    .push((key.trim().to_string(), label.trim().to_string()));
+            }
+            continue;
+        }
+        if let Some(text) = trimmed.strip_prefix("Text: ") {
+            property.label = text.trim().to_string();
+        } else if let Some(text) = trimmed.strip_prefix("Min: ") {
+            property.min = text.trim().parse().unwrap_or(0.0);
+        } else if let Some(text) = trimmed.strip_prefix("Max: ") {
+            property.max = text.trim().parse().unwrap_or(1.0);
+        } else if let Some(text) = trimmed.strip_prefix("Step: ") {
+            property.step = text.trim().parse().unwrap_or(0.01);
+        } else if let Some(text) = trimmed.strip_prefix("Value: ") {
+            let text = text.trim();
+            property.value = match property.kind {
+                // The engine prints colours as four floats from 0 to 1.
+                PropertyKind::Color => color_from_floats(text),
+                // `0.600000` is noise; the step says what matters.
+                PropertyKind::Slider => {
+                    let step = property.step;
+                    text.parse::<f64>()
+                        .map(|value| number_value(value, step))
+                        .unwrap_or_else(|_| text.to_string())
+                }
+                _ => text.to_string(),
+            };
+        }
+    }
+    if let Some(done) = current.take() {
+        properties.push(done);
+    }
+    for property in &mut properties {
+        property.default = property.value.clone();
+    }
+    properties
+}
+
+/// `0.752941, 0.752941, 0.752941, 1.000000` → `192,192,192,255`.
+fn color_from_floats(text: &str) -> String {
+    let mut parts: Vec<u8> = text
+        .split(',')
+        .map(|part| {
+            let value: f64 = part.trim().parse().unwrap_or(0.0);
+            (value.clamp(0.0, 1.0) * 255.0).round() as u8
+        })
+        .collect();
+    while parts.len() < 4 {
+        parts.push(255);
+    }
+    parts.truncate(4);
+    format!("{},{},{},{}", parts[0], parts[1], parts[2], parts[3])
+}
+
+/// `R,G,B,A` in the 0…255 range, as `--set-property` expects it.
+pub fn color_value(components: [u8; 4]) -> String {
+    format!(
+        "{},{},{},{}",
+        components[0], components[1], components[2], components[3]
+    )
+}
+
+/// Split a `R,G,B,A` value from the config back into components.
+pub fn color_components(value: &str) -> [u8; 4] {
+    let mut parts = [255u8; 4];
+    for (slot, part) in parts.iter_mut().zip(value.split(',')) {
+        *slot = part.trim().parse().unwrap_or(255);
+    }
+    parts
+}
+
+/// `1` or `0`, the two strings the engine reads as booleans.
+pub fn bool_value(enabled: bool) -> String {
+    if enabled { "1" } else { "0" }.to_string()
+}
+
+/// A slider value without the noise of float formatting.
+pub fn number_value(value: f64, step: f64) -> String {
+    let digits = match step {
+        step if step >= 1.0 => 0,
+        step if step >= 0.1 => 1,
+        step if step >= 0.01 => 2,
+        step if step >= 0.001 => 3,
+        _ => 4,
+    };
+    format!("{value:.digits$}")
 }
 
 fn log_line(message: &str) {
@@ -430,7 +731,8 @@ mod tests {
                 id: "222".into(),
             },
         ];
-        let args = arguments(&targets, None, "fill");
+        let properties = BTreeMap::new();
+        let args = arguments(&targets, None, "fill", &properties);
         assert_eq!(
             args,
             vec![
@@ -446,10 +748,173 @@ mod tests {
                 "222"
             ]
         );
-        let with_assets = arguments(&targets[..1], Some(Path::new("/opt/assets")), "fit");
+        let with_assets = arguments(
+            &targets[..1],
+            Some(Path::new("/opt/assets")),
+            "fit",
+            &properties,
+        );
         assert_eq!(with_assets[0], "--assets-dir");
         assert_eq!(with_assets[1], "/opt/assets");
         assert_eq!(with_assets[2], "--scaling");
         assert_eq!(with_assets[3], "fit");
+    }
+
+    #[test]
+    fn passes_scene_settings_as_overrides() {
+        let mut properties = BTreeMap::new();
+        properties.insert("clock".to_string(), "0".to_string());
+        properties.insert("audiobarscolor".to_string(), "255,0,128,255".to_string());
+        let targets = vec![Target {
+            screen: "DP-1".into(),
+            id: "111".into(),
+        }];
+        let args = arguments(&targets, None, "fill", &properties);
+        assert_eq!(
+            args,
+            vec![
+                "--scaling",
+                "fill",
+                "--set-property",
+                "audiobarscolor=255,0,128,255",
+                "--set-property",
+                "clock=0",
+                "--screen-root",
+                "DP-1",
+                "--bg",
+                "111"
+            ]
+        );
+    }
+
+    const PROPERTIES: &str = r#"Running with: ./linux-wallpaperengine --assets-dir /assets
+Using wallpaper engine's assets at "/assets" based on --assets-dir parameter
+audiobars - combo
+	Text: Audio bars:
+	Value: 3
+Values: 
+		0 = Off
+		1 = Left
+		3 = Bottom
+
+audiobarscolor - color
+	Text: Audio bars color:
+	Value: 0.752941, 0.752941, 0.752941, 1.000000
+
+clock - boolean
+	Text: Clock
+	Value: 1
+
+hairanimationspeed - slider
+	Text: Hair Animation Speed
+	Min: 0.01
+	Max: 4
+	Step: 0.01
+	Value: 2.500000
+
+schemecolor - color
+	Text: ui_browse_properties_scheme_color
+	Value: 0.000000, 0.000000, 0.000000, 1.000000
+"#;
+
+    #[test]
+    fn reads_every_kind_of_scene_setting() {
+        let properties = parse_properties(PROPERTIES);
+        let keys: Vec<&str> = properties.iter().map(|item| item.key.as_str()).collect();
+        assert_eq!(
+            keys,
+            vec![
+                "audiobars",
+                "audiobarscolor",
+                "clock",
+                "hairanimationspeed",
+                "schemecolor"
+            ]
+        );
+
+        let combo = &properties[0];
+        assert_eq!(combo.kind, PropertyKind::Combo);
+        assert_eq!(combo.title(), "Audio bars:");
+        assert_eq!(combo.value, "3");
+        assert_eq!(combo.options.len(), 3);
+        assert_eq!(combo.options[2].0, "3");
+        assert_eq!(combo.options[2].1, "Bottom");
+
+        let color = &properties[1];
+        assert_eq!(color.kind, PropertyKind::Color);
+        assert_eq!(color.value, "192,192,192,255");
+
+        let boolean = &properties[2];
+        assert_eq!(boolean.kind, PropertyKind::Boolean);
+        assert_eq!(boolean.value, "1");
+
+        let slider = &properties[3];
+        assert_eq!(slider.kind, PropertyKind::Slider);
+        assert_eq!(slider.value, "2.50");
+        assert_eq!(slider.default, "2.50");
+        assert_eq!((slider.min, slider.max, slider.step), (0.01, 4.0, 0.01));
+        assert_eq!(number_value(2.5, slider.step), "2.50");
+
+        // Translation keys are useless in a window; the property name is not.
+        assert_eq!(properties[4].title(), "schemecolor");
+    }
+
+    #[test]
+    fn tolerates_empty_and_junk_output() {
+        assert!(parse_properties("").is_empty());
+        assert!(parse_properties("Running with: something\nUsing assets\n").is_empty());
+    }
+
+    #[test]
+    fn converts_colours_both_ways() {
+        assert_eq!(color_components("255,0,128,255"), [255, 0, 128, 255]);
+        assert_eq!(color_components(" 12, 34,56 , 78 "), [12, 34, 56, 78]);
+        assert_eq!(color_components("bad"), [255, 255, 255, 255]);
+        assert_eq!(color_value([1, 2, 3, 4]), "1,2,3,4");
+        assert_eq!(bool_value(false), "0");
+        assert_eq!(bool_value(true), "1");
+        assert_eq!(number_value(0.5, 1.0), "0");
+        assert_eq!(number_value(0.5294, 0.001), "0.529");
+    }
+
+    #[test]
+    fn normalises_what_a_person_types() {
+        let properties = parse_properties(PROPERTIES);
+
+        let clock = properties.iter().find(|item| item.key == "clock").unwrap();
+        assert_eq!(clock.normalize("off").unwrap(), "0");
+        assert_eq!(clock.normalize("TRUE").unwrap(), "1");
+        assert!(clock.normalize("maybe").is_err());
+
+        let bars = properties
+            .iter()
+            .find(|item| item.key == "audiobars")
+            .unwrap();
+        assert_eq!(bars.normalize("Bottom").unwrap(), "3");
+        assert_eq!(bars.normalize("0").unwrap(), "0");
+        assert!(bars.normalize("9").is_err());
+
+        let colour = properties
+            .iter()
+            .find(|item| item.key == "audiobarscolor")
+            .unwrap();
+        assert_eq!(
+            colour.normalize("255, 128, 0, 255").unwrap(),
+            "255,128,0,255"
+        );
+        assert_eq!(colour.normalize("#f80").unwrap(), "255,136,0,255");
+        assert_eq!(colour.normalize("#ff8800").unwrap(), "255,136,0,255");
+        assert_eq!(colour.normalize("#ff880080").unwrap(), "255,136,0,128");
+        assert!(colour.normalize("255,0,0").is_err());
+        assert!(colour.normalize("#zzz").is_err());
+
+        let speed = properties
+            .iter()
+            .find(|item| item.key == "hairanimationspeed")
+            .unwrap();
+        assert_eq!(speed.normalize("2.5").unwrap(), "2.50");
+        // Out of range values are clamped instead of rejected.
+        assert_eq!(speed.normalize("40").unwrap(), "4.00");
+        assert!(speed.normalize("fast").is_err());
     }
 }

@@ -17,6 +17,9 @@ const RETRY: Duration = Duration::from_secs(10);
 pub struct Host {
     child: Option<Child>,
     targets: Vec<Target>,
+    /// The command line the running child was started with; a change of scene
+    /// settings shows up here and means the child must be restarted.
+    args: Vec<String>,
     failed: Option<Instant>,
     missing_logged: bool,
 }
@@ -26,6 +29,7 @@ impl Host {
         Self {
             child: None,
             targets: Vec::new(),
+            args: Vec::new(),
             failed: None,
             missing_logged: false,
         }
@@ -39,7 +43,19 @@ impl Host {
             return;
         }
 
-        if self.targets == targets {
+        let assets = if cfg.engine.assets.trim().is_empty() {
+            engine::assets_dir()
+        } else {
+            Some(PathBuf::from(veil::config::expand(&cfg.engine.assets)))
+        };
+        let args = engine::arguments(
+            &targets,
+            assets.as_deref(),
+            &cfg.engine.scaling,
+            &cfg.engine.properties,
+        );
+
+        if self.targets == targets && self.args == args {
             if let Some(child) = self.child.as_mut() {
                 match child.try_wait() {
                     Ok(None) => return,
@@ -69,21 +85,16 @@ impl Host {
                 self.missing_logged = true;
             }
             self.targets = targets;
+            self.args = args;
             self.failed = Some(Instant::now());
             return;
         };
 
-        let assets = if cfg.engine.assets.trim().is_empty() {
-            engine::assets_dir()
-        } else {
-            Some(PathBuf::from(veil::config::expand(&cfg.engine.assets)))
-        };
         if assets.is_none() {
             log::warn!(
                 "Wallpaper Engine assets not found; scenes may fail until it is installed in Steam"
             );
         }
-        let args = engine::arguments(&targets, assets.as_deref(), &cfg.engine.scaling);
         log::info!("engine: {} {}", binary.display(), args.join(" "));
 
         match Command::new(&binary)
@@ -98,12 +109,14 @@ impl Host {
                 log::info!("engine started, pid {}", child.id());
                 self.child = Some(child);
                 self.targets = targets;
+                self.args = args;
                 self.failed = None;
                 self.missing_logged = false;
             }
             Err(error) => {
                 log::warn!("cannot start {}: {error}", binary.display());
                 self.targets = targets;
+                self.args = args;
                 self.failed = Some(Instant::now());
             }
         }
@@ -116,6 +129,7 @@ impl Host {
             log::info!("engine stopped");
         }
         self.targets.clear();
+        self.args.clear();
     }
 
     /// Whether a child process is (still) running.

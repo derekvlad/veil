@@ -202,6 +202,10 @@ pub struct EngineSettings {
     pub assets: String,
     /// `fill`, `fit` or `stretch`, passed straight to the engine.
     pub scaling: String,
+    /// Scene settings as `--set-property key=value`, keyed by property name.
+    /// Keys come from `veilctl engine props <id>`; unknown ones are ignored.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub properties: BTreeMap<String, String>,
 }
 
 impl Default for EngineSettings {
@@ -210,6 +214,7 @@ impl Default for EngineSettings {
             binary: String::new(),
             assets: String::new(),
             scaling: "fill".into(),
+            properties: BTreeMap::new(),
         }
     }
 }
@@ -298,6 +303,11 @@ url = ""
 binary = ""
 assets = ""
 scaling = "fill"
+# Scene settings: keys and values as `veilctl engine props <id>` lists them.
+# Booleans are "1"/"0", colours are "R,G,B,A" from 0 to 255.
+# [engine.properties]
+# clock = "0"
+# audiobars = "0"
 
 # Desktop widgets: `veil-widgets` draws them over the wallpaper, under windows.
 # Positions are percent of the monitor, 0…100; `output` limits a widget to one

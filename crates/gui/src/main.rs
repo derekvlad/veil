@@ -4,6 +4,7 @@
 //! any desktop that can run the daemon, from niri to KDE and GNOME.
 
 mod library;
+mod scene;
 mod widgets;
 mod workshop;
 
@@ -31,6 +32,8 @@ const MODES: [Mode; 4] = [Mode::Fill, Mode::Fit, Mode::Stretch, Mode::Center];
 static OPEN_WORKSHOP: OnceLock<bool> = OnceLock::new();
 /// Set by `--widgets`, read when the main window is built.
 static OPEN_WIDGETS: OnceLock<bool> = OnceLock::new();
+/// Workshop id from `--scene`, opened once the main window exists.
+static OPEN_SCENE: OnceLock<String> = OnceLock::new();
 
 fn main() -> glib::ExitCode {
     let app = adw::Application::builder().application_id(APP_ID).build();
@@ -50,15 +53,67 @@ fn main() -> glib::ExitCode {
         "Open the widget editor",
         None,
     );
-    app.connect_handle_local_options(|_, options| {
-        if options.contains("workshop") {
-            let _ = OPEN_WORKSHOP.set(true);
+    app.add_main_option(
+        "scene",
+        glib::Char::from(b'S'),
+        glib::OptionFlags::NONE,
+        glib::OptionArg::String,
+        "Open the settings of a Wallpaper Engine scene",
+        Some("ID"),
+    );
+    app.connect_handle_local_options({
+        let app = app.clone();
+        move |_, options| {
+            if options.contains("workshop") {
+                let _ = OPEN_WORKSHOP.set(true);
+            }
+            if options.contains("widgets") {
+                let _ = OPEN_WIDGETS.set(true);
+            }
+            if let Some(value) = options.lookup_value("scene", Some(glib::VariantTy::STRING)) {
+                if let Some(id) = value.get::<String>() {
+                    // Registering here tells us whether another veil-gui owns the
+                    // id; if so, its window should open the settings, not a new one.
+                    let _ = app.register(gio::Cancellable::NONE);
+                    if app.is_remote() {
+                        app.activate_action("open-scene", Some(&id.to_variant()));
+                        return std::ops::ControlFlow::Break(glib::ExitCode::SUCCESS);
+                    }
+                    let _ = OPEN_SCENE.set(id);
+                }
+            }
+            std::ops::ControlFlow::Continue(())
         }
-        if options.contains("widgets") {
-            let _ = OPEN_WIDGETS.set(true);
-        }
-        std::ops::ControlFlow::Continue(())
     });
+    // A window that is already open must be reachable from a second launch:
+    // `veil-gui --scene <id>` hands the id to the running instance.
+    let open_scene = gio::SimpleAction::new("open-scene", Some(glib::VariantTy::STRING));
+    open_scene.connect_activate({
+        let app = app.clone();
+        move |_, parameter| {
+            let Some(id) = parameter.and_then(|value| value.get::<String>()) else {
+                return;
+            };
+            // A weak reference avoids a cycle: the state itself owns the window.
+            let state = app.windows().iter().find_map(|window| {
+                let weak = unsafe { window.data::<std::rc::Weak<AppState>>("veil-state") }?;
+                unsafe { weak.as_ref() }.upgrade()
+            });
+            match state {
+                Some(state) => match veil::engine::find(&id) {
+                    Some(item) => scene::open(&state, &item),
+                    None => state.toast(&format!("{id}: no such Wallpaper Engine scene")),
+                },
+                None => {
+                    // No window yet: building one reads the static and opens it.
+                    let _ = OPEN_SCENE.set(id);
+                    app.activate();
+                }
+            }
+        }
+    });
+    app.add_action(&open_scene);
+
     app.connect_startup(|_| load_css());
     app.connect_activate(build_window);
     app.run()
@@ -182,6 +237,12 @@ fn load_css() {
         .selected-widget {
             box-shadow: 0 0 0 2px alpha(@accent_color, 0.9);
             border-radius: 10px;
+        }
+        .scene-row {
+            border-bottom: 1px solid alpha(currentColor, 0.08);
+        }
+        .scene-settings {
+            background: @window_bg_color;
         }
         "#,
     );
@@ -359,6 +420,10 @@ fn build_window(app: &adw::Application) {
         Some("win.workshop"),
     );
     menu.append(Some(t("Widgets…", "Виджеты…")), Some("win.widgets"));
+    menu.append(
+        Some(t("Scene settings…", "Настройки сцены…")),
+        Some("win.scene"),
+    );
     menu.append(Some(t("About veil", "О программе")), Some("win.about"));
     menu.append(Some(t("Quit", "Выход")), Some("app.quit"));
 
@@ -749,6 +814,33 @@ fn build_window(app: &adw::Application) {
     });
     window.add_action(&widgets_action);
 
+    let scene_action = gio::SimpleAction::new("scene", None);
+    scene_action.connect_activate({
+        let state = state.clone();
+        move |_, _| {
+            // Whatever scene is on screen: the global wallpaper or a monitor's.
+            let paths: Vec<String> = {
+                let cfg = state.cfg.borrow();
+                std::iter::once(cfg.wallpaper.path.clone())
+                    .chain(cfg.outputs.values().cloned())
+                    .collect()
+            };
+            let item = paths
+                .iter()
+                .filter_map(|path| veil::engine::marker_id(path))
+                .filter_map(veil::engine::find)
+                .next();
+            match item {
+                Some(item) => scene::open(&state, &item),
+                None => state.toast(t(
+                    "Put a Wallpaper Engine scene on screen first",
+                    "Сначала поставьте сцену Wallpaper Engine",
+                )),
+            }
+        }
+    });
+    window.add_action(&scene_action);
+
     let about = gio::SimpleAction::new("about", None);
     about.connect_activate({
         let state = state.clone();
@@ -766,6 +858,7 @@ fn build_window(app: &adw::Application) {
     app.set_accels_for_action("win.refresh", &["F5"]);
     app.set_accels_for_action("win.workshop", &["<Control>w"]);
     app.set_accels_for_action("win.widgets", &["<Control><Shift>w"]);
+    app.set_accels_for_action("win.scene", &["<Control><Shift>s"]);
     app.set_accels_for_action("app.quit", &["<Control>q"]);
 
     // --------------------------------------------------------------- behaviour
@@ -816,6 +909,14 @@ fn build_window(app: &adw::Application) {
     if OPEN_WIDGETS.get().copied().unwrap_or(false) {
         let state = state.clone();
         glib::idle_add_local_once(move || widgets::open(&state));
+    }
+    if let Some(id) = OPEN_SCENE.get() {
+        let id = id.clone();
+        let state = state.clone();
+        glib::idle_add_local_once(move || match veil::engine::find(&id) {
+            Some(item) => scene::open(&state, &item),
+            None => state.toast(&format!("{id}: no such Wallpaper Engine scene")),
+        });
     }
     state.pause_button.connect_clicked({
         let state = state.clone();
@@ -1002,6 +1103,11 @@ fn build_window(app: &adw::Application) {
 
     install_drop_target(&state);
     watch_library(&state);
+
+    // The app-level `open-scene` action finds the shared state through this.
+    unsafe {
+        window.set_data("veil-state", Rc::downgrade(&state));
+    }
 
     state.ready.set(true);
     rebuild_library(&state);
@@ -1303,6 +1409,46 @@ fn build_spec_card(state: &Rc<AppState>, spec: CardSpec) -> Card {
             apply_wallpaper(&state, Path::new(&path));
         }
     });
+
+    if engine {
+        if let Some(item) = veil::engine::marker_id(&path).and_then(veil::engine::find) {
+            let popover = gtk::Popover::new();
+            popover.set_has_arrow(false);
+            let settings = gtk::Button::builder()
+                .label(t("Scene settings…", "Настройки сцены…"))
+                .icon_name("emblem-system-symbolic")
+                .has_frame(false)
+                .build();
+            popover.set_child(Some(&settings));
+            popover.set_parent(&button);
+            settings.connect_clicked({
+                let weak = Rc::downgrade(state);
+                let popover = popover.clone();
+                let item = item.clone();
+                move |_| {
+                    popover.popdown();
+                    if let Some(state) = weak.upgrade() {
+                        scene::open(&state, &item);
+                    }
+                }
+            });
+            let gesture = gtk::GestureClick::new();
+            gesture.set_button(3);
+            gesture.connect_pressed({
+                let popover = popover.clone();
+                move |_, _, x, y| {
+                    popover
+                        .set_pointing_to(Some(&gtk::gdk::Rectangle::new(x as i32, y as i32, 1, 1)));
+                    popover.popup();
+                }
+            });
+            button.add_controller(gesture);
+            button.set_tooltip_text(Some(t(
+                "Click to paint this scene · right click for its settings",
+                "Нажмите, чтобы поставить · правый клик — настройки сцены",
+            )));
+        }
+    }
 
     if !spec.removable {
         return Card {

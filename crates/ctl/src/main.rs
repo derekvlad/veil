@@ -24,6 +24,8 @@ fn usage() {
          \x20 veilctl engine list|status             Wallpaper Engine content\n\
          \x20 veilctl engine apply <id> [--output DP-1]\n\
          \x20 veilctl engine props <id>              scene settings\n\
+         \x20 veilctl engine set <id> <key> <value>  change a scene setting\n\
+         \x20 veilctl engine unset <id> [key]        drop scene overrides\n\
          \x20 veilctl widgets [list]                desktop widgets from [[widgets]]\n\
          \x20                                    list the workshop catalogue\n\
          \x20 veilctl reload                     re-read the config file\n\
@@ -315,38 +317,120 @@ fn engine_command(args: &[String]) {
             }
         }
         Some("props") => {
-            let Some(reference) = args.get(2) else {
-                eprintln!("veilctl: `engine props` needs a workshop id");
+            let (cfg, item) = scene_from_args(args, 2, "props");
+            let properties = match scene_properties(&cfg, &item) {
+                Ok(properties) => properties,
+                Err(error) => {
+                    eprintln!("veilctl: {error}");
+                    std::process::exit(1);
+                }
+            };
+            println!("{} ({})", item.title, item.id);
+            for property in &properties {
+                let override_value = cfg.engine.properties.get(&property.key);
+                let value = override_value.unwrap_or(&property.value);
+                println!(
+                    "  {:<24} {:<8} {}{}",
+                    property.key,
+                    property_kind_name(property.kind),
+                    value,
+                    if override_value.is_some() {
+                        "  (set by you)"
+                    } else {
+                        ""
+                    }
+                );
+                if !property.label.trim().is_empty() && property.title() != property.key {
+                    println!("  {:<24} {}", "", property.title());
+                }
+                for (key, label) in &property.options {
+                    println!("  {:<24} {key} = {label}", "");
+                }
+            }
+            if !cfg.engine.properties.is_empty() {
+                println!();
+                for (key, value) in &cfg.engine.properties {
+                    println!("override: {key} = {value}");
+                }
+            }
+            println!();
+            println!("change one:  veilctl engine set {} <key> <value>", item.id);
+        }
+        Some("set") => {
+            let (mut cfg, item) = scene_from_args(args, 2, "set");
+            let Some(key) = args.get(3) else {
+                eprintln!("veilctl: `engine set` needs a key and a value");
                 std::process::exit(2);
             };
-            let id = engine::marker_id(reference).unwrap_or(reference);
-            let Some(item) = engine::find(id) else {
-                eprintln!("veilctl: no wallpaper {id} in the Steam workshop folder");
+            let value: String = args[4..].join(" ");
+            if value.trim().is_empty() {
+                eprintln!("veilctl: `engine set` needs a value after `{key}`");
+                std::process::exit(2);
+            }
+            let properties = match scene_properties(&cfg, &item) {
+                Ok(properties) => properties,
+                Err(error) => {
+                    eprintln!("veilctl: {error}");
+                    std::process::exit(1);
+                }
+            };
+            let Some(property) = properties.iter().find(|item| &item.key == key) else {
+                eprintln!("veilctl: this scene has no setting `{key}`");
                 std::process::exit(1);
             };
-            let (cfg, _) = match Config::load() {
+            let value = match property.normalize(&value) {
+                Ok(value) => value,
+                Err(error) => {
+                    eprintln!("veilctl: {error}");
+                    std::process::exit(2);
+                }
+            };
+            if value == property.default_value() {
+                cfg.engine.properties.remove(key);
+            } else {
+                cfg.engine.properties.insert(key.clone(), value.clone());
+            }
+            let (_, path) = match Config::load() {
                 Ok(loaded) => loaded,
                 Err(error) => {
                     eprintln!("veilctl: {error}");
                     std::process::exit(1);
                 }
             };
-            let Some(binary) = engine::binary(&cfg.engine.binary) else {
-                eprintln!("veilctl: linux-wallpaperengine is not installed");
+            if let Err(error) = cfg.save_to(&path) {
+                eprintln!("veilctl: {error}");
                 std::process::exit(1);
-            };
-            let status = std::process::Command::new(binary)
-                .arg("--list-properties")
-                .arg(&item.dir)
-                .status();
-            match status {
-                Ok(status) if status.success() => {}
-                Ok(status) => std::process::exit(status.code().unwrap_or(1)),
+            }
+            println!("{key} = {value}");
+            reload_daemon(key);
+        }
+        Some("unset") => {
+            let (mut cfg, item) = scene_from_args(args, 2, "unset");
+            let (_, path) = match Config::load() {
+                Ok(loaded) => loaded,
                 Err(error) => {
                     eprintln!("veilctl: {error}");
                     std::process::exit(1);
                 }
+            };
+            match args.get(3) {
+                Some(key) => {
+                    cfg.engine.properties.remove(key);
+                    println!("dropped override `{key}`");
+                }
+                None => {
+                    let properties = scene_properties(&cfg, &item).unwrap_or_default();
+                    for property in &properties {
+                        cfg.engine.properties.remove(&property.key);
+                    }
+                    println!("dropped every override of scene {}", item.id);
+                }
             }
+            if let Err(error) = cfg.save_to(&path) {
+                eprintln!("veilctl: {error}");
+                std::process::exit(1);
+            }
+            reload_daemon("");
         }
         Some("status") => engine_status(),
         Some("list") | None => {
@@ -378,6 +462,85 @@ fn engine_command(args: &[String]) {
             eprintln!("veilctl: unknown `engine` command `{other}`");
             std::process::exit(2);
         }
+    }
+}
+
+/// Resolve `<id>` and load the config for one scene command.
+fn scene_from_args(args: &[String], index: usize, command: &str) -> (Config, veil::engine::Item) {
+    let Some(reference) = args.get(index) else {
+        eprintln!("veilctl: `engine {command}` needs a workshop id");
+        std::process::exit(2);
+    };
+    let id = veil::engine::marker_id(reference).unwrap_or(reference);
+    let Some(item) = veil::engine::find(id) else {
+        eprintln!("veilctl: no wallpaper {id} in the Steam workshop folder");
+        std::process::exit(1);
+    };
+    let (cfg, _) = match Config::load() {
+        Ok(loaded) => loaded,
+        Err(error) => {
+            eprintln!("veilctl: {error}");
+            std::process::exit(1);
+        }
+    };
+    (cfg, item)
+}
+
+/// Ask the engine which settings the scene declares.
+fn scene_properties(
+    cfg: &Config,
+    item: &veil::engine::Item,
+) -> Result<Vec<veil::engine::Property>, String> {
+    let Some(binary) = veil::engine::binary(&cfg.engine.binary) else {
+        return Err("linux-wallpaperengine is not installed".into());
+    };
+    let assets = if cfg.engine.assets.trim().is_empty() {
+        veil::engine::assets_dir()
+    } else {
+        Some(std::path::PathBuf::from(veil::config::expand(
+            &cfg.engine.assets,
+        )))
+    };
+    let mut command = std::process::Command::new(binary);
+    if let Some(assets) = assets {
+        command.arg("--assets-dir").arg(assets);
+    }
+    command.arg("--list-properties").arg(&item.dir);
+    let output = command
+        .output()
+        .map_err(|error| format!("{}: {error}", item.dir.display()))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let last = stderr.lines().last().unwrap_or_default();
+        return Err(format!("{}: {last}", item.dir.display()));
+    }
+    Ok(veil::engine::parse_properties(&String::from_utf8_lossy(
+        &output.stdout,
+    )))
+}
+
+fn property_kind_name(kind: veil::engine::PropertyKind) -> &'static str {
+    use veil::engine::PropertyKind;
+    match kind {
+        PropertyKind::Boolean => "boolean",
+        PropertyKind::Combo => "combo",
+        PropertyKind::Slider => "slider",
+        PropertyKind::Color => "color",
+        PropertyKind::Text => "text",
+        PropertyKind::File => "file",
+        PropertyKind::SceneTexture => "texture",
+        PropertyKind::Unknown => "other",
+    }
+}
+
+fn reload_daemon(what: &str) {
+    match ipc::call(&Request::Reload) {
+        Ok(_) => {
+            if !what.is_empty() {
+                println!("applied to the running daemon");
+            }
+        }
+        Err(_) => println!("saved; the daemon is not running, it reads the file on start"),
     }
 }
 
