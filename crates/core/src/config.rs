@@ -209,6 +209,9 @@ pub struct EngineSettings {
     /// `libcef.so` to preload for web wallpapers; empty finds it, `none` skips.
     #[serde(skip_serializing_if = "String::is_empty")]
     pub preload: String,
+    /// Let scenes play their own sound. Off by default: a wallpaper that talks
+    /// over music is a surprise, and two screens used to play it twice.
+    pub audio: bool,
 }
 
 impl Default for EngineSettings {
@@ -219,6 +222,7 @@ impl Default for EngineSettings {
             scaling: "fill".into(),
             properties: BTreeMap::new(),
             preload: String::new(),
+            audio: false,
         }
     }
 }
@@ -315,6 +319,8 @@ scaling = "fill"
 # Web wallpapers need libcef.so loaded before libc (upstream bug #628); empty
 # finds it next to the engine, `none` turns the preload off.
 # preload = ""
+# Scenes can play their own sound; off by default, so wallpapers stay quiet.
+# audio = false
 
 # Desktop widgets: `veil-widgets` draws them over the wallpaper, under windows.
 # Positions are percent of the monitor, 0…100; `output` limits a widget to one

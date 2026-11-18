@@ -507,6 +507,14 @@ fn build_window(app: &adw::Application) {
         ),
         config.playback.mute,
     );
+    let (scene_audio_row, scene_audio_switch) = switch_row(
+        t("Wallpaper sound", "Звук обоев"),
+        t(
+            "Let Wallpaper Engine scenes play their own music",
+            "Разрешить сценам Wallpaper Engine играть свой звук",
+        ),
+        config.engine.audio,
+    );
     let (fullscreen_row, fullscreen_switch) = switch_row(
         t("Pause in fullscreen", "Пауза в полноэкранном режиме"),
         t(
@@ -533,6 +541,7 @@ fn build_window(app: &adw::Application) {
     );
 
     sidebar_inner.append(&mute_row);
+    sidebar_inner.append(&scene_audio_row);
     sidebar_inner.append(&fullscreen_row);
 
     let idle_box = gtk::Box::new(gtk::Orientation::Vertical, 6);
@@ -1028,6 +1037,16 @@ fn build_window(app: &adw::Application) {
                 return;
             }
             state.cfg.borrow_mut().playback.mute = switch.is_active();
+            state.push_settings();
+        }
+    });
+    scene_audio_switch.connect_active_notify({
+        let state = state.clone();
+        move |switch| {
+            if !state.ready.get() {
+                return;
+            }
+            state.cfg.borrow_mut().engine.audio = switch.is_active();
             state.push_settings();
         }
     });

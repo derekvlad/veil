@@ -53,6 +53,7 @@ impl Host {
             assets.as_deref(),
             &cfg.engine.scaling,
             &cfg.engine.properties,
+            cfg.engine.audio,
         );
 
         if self.targets == targets && self.args == args {

@@ -315,6 +315,7 @@ pub fn arguments(
     assets: Option<&Path>,
     scaling: &str,
     properties: &BTreeMap<String, String>,
+    audio: bool,
 ) -> Vec<String> {
     let mut args = Vec::new();
     if let Some(assets) = assets {
@@ -323,6 +324,11 @@ pub fn arguments(
     }
     args.push("--scaling".into());
     args.push(scaling.to_string());
+    if !audio {
+        // Muted by default: the engine would otherwise mix a scene's soundtrack
+        // into whatever the user is listening to.
+        args.push("--silent".into());
+    }
     for (key, value) in properties {
         // The engine silently ignores unknown keys, so a value left over from
         // another scene is harmless.
@@ -781,7 +787,7 @@ mod tests {
             },
         ];
         let properties = BTreeMap::new();
-        let args = arguments(&targets, None, "fill", &properties);
+        let args = arguments(&targets, None, "fill", &properties, true);
         assert_eq!(
             args,
             vec![
@@ -802,11 +808,14 @@ mod tests {
             Some(Path::new("/opt/assets")),
             "fit",
             &properties,
+            true,
         );
         assert_eq!(with_assets[0], "--assets-dir");
         assert_eq!(with_assets[1], "/opt/assets");
         assert_eq!(with_assets[2], "--scaling");
         assert_eq!(with_assets[3], "fit");
+        // Audio on means no --silent flag at all.
+        assert!(!with_assets.contains(&"--silent".to_string()));
     }
 
     #[test]
@@ -818,12 +827,13 @@ mod tests {
             screen: "DP-1".into(),
             id: "111".into(),
         }];
-        let args = arguments(&targets, None, "fill", &properties);
+        let args = arguments(&targets, None, "fill", &properties, false);
         assert_eq!(
             args,
             vec![
                 "--scaling",
                 "fill",
+                "--silent",
                 "--set-property",
                 "audiobarscolor=255,0,128,255",
                 "--set-property",
