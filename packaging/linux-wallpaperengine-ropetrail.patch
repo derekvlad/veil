@@ -1,0 +1,351 @@
+diff --git a/src/WallpaperEngine/Render/Objects/CParticle.cpp b/src/WallpaperEngine/Render/Objects/CParticle.cpp
+index 444752aa..26b38a84 100644
+--- a/src/WallpaperEngine/Render/Objects/CParticle.cpp
++++ b/src/WallpaperEngine/Render/Objects/CParticle.cpp
+@@ -69,8 +69,23 @@ CParticle::CParticle (Wallpapers::CScene& scene, const Particle& particle) :
+ 	// Rope: connects N particles with (N-1) segments, each subdivided into sub-segments
+ 	const int subdivision = std::max (1, m_ropeSubdivision);
+ 	const int maxSubSegments = std::max (1, static_cast<int> (m_maxParticles - 1)) * subdivision;
+-	m_vertices.resize (maxSubSegments * 4 * ROPE_FLOATS_PER_VERTEX);
+-	m_indices.resize (maxSubSegments * 6);
++	// Ropetrail draws one ribbon per particle out of its own history row, so
++	// the pool has to hold `segments` quads for each of them, each quad
++	// subdivided the same way an ordinary rope is.
++	const int trailQuads
++	    = m_useTrailRenderer ? static_cast<int> (m_maxParticles) * m_ropeSegments * subdivision : 0;
++	const int maxQuads = std::max (maxSubSegments, trailQuads);
++	m_vertices.resize (maxQuads * 4 * ROPE_FLOATS_PER_VERTEX);
++	m_indices.resize (maxQuads * 6);
++	if (m_useTrailRenderer) {
++	    m_ropeTrailHistory.assign (
++		static_cast<size_t> (m_maxParticles) * static_cast<size_t> (m_ropeSegments), glm::vec3 (0.0f)
++	    );
++	    m_ropeTrailFilled.assign (m_maxParticles, 0);
++	    // Wallpaper Engine stores length / segments as the sampling interval.
++	    m_ropeTrailInterval = std::max (0.001f, m_trailLength) / static_cast<float> (m_ropeSegments);
++	    m_ropeTrailCountdown = m_ropeTrailInterval;
++	}
+     } else {
+ 	// Trail particles: (N+1) * 2 vertices for ribbon strip, N * 6 indices for N quads
+ 	// Normal particles: 4 vertices, 6 indices
+@@ -180,7 +195,7 @@ void CParticle::render () {
+ 	// Skip update on first frame to avoid weird initial burst
+ 	// This ensures all particles start from a clean state
+ 	if (m_useRopeRenderer) {
+-	    renderRope ();
++	    m_useTrailRenderer ? renderRopeTrail () : renderRope ();
+ 	} else {
+ 	    renderSprites ();
+ 	}
+@@ -201,7 +216,7 @@ void CParticle::render () {
+     // Render particles
+     if (m_particleCount > 0 && m_particle.material) {
+ 	if (m_useRopeRenderer) {
+-	    renderRope ();
++	    m_useTrailRenderer ? renderRopeTrail () : renderRope ();
+ 	} else {
+ 	    renderSprites ();
+ 	}
+@@ -256,10 +271,21 @@ void CParticle::update (float dt) {
+     }
+ 
+     // Emit particles
++    const uint32_t countBeforeEmit = m_particleCount;
+     for (auto& emitter : m_emitters) {
+ 	emitter (m_particles, m_particleCount, dt);
+     }
+ 
++    // A fresh particle starts its own trail from where it appeared; the slot may
++    // still hold the history row of a past particle, so clear it here.
++    if (m_useRopeRenderer && m_useTrailRenderer) {
++	for (uint32_t i = countBeforeEmit; i < m_particleCount; i++) {
++	    auto row = m_ropeTrailHistory.begin () + static_cast<size_t> (i) * m_ropeSegments;
++	    std::fill_n (row, m_ropeSegments, m_particles[i].position);
++	    m_ropeTrailFilled[i] = 1;
++	}
++    }
++
+     // Update particle age
+     for (uint32_t i = 0; i < m_particleCount; i++) {
+ 	m_particles[i].age += dt;
+@@ -270,6 +296,16 @@ void CParticle::update (float dt) {
+ 	op (m_particles, m_particleCount, m_controlPoints, static_cast<float> (m_time), dt);
+     }
+ 
++    // Ropetrail samples each particle's own position on a fixed interval, so the
++    // ribbon behind it is that particle's path rather than the whole emitter's.
++    if (m_useRopeRenderer && m_useTrailRenderer) {
++	m_ropeTrailCountdown -= dt;
++	if (m_ropeTrailCountdown <= 0.0f) {
++	    m_ropeTrailCountdown = m_ropeTrailInterval;
++	    sampleRopeTrailHistory (0, m_particleCount);
++	}
++    }
++
+     // Update animation frames
+     for (uint32_t i = 0; i < m_particleCount; i++) {
+ 	auto& p = m_particles[i];
+@@ -313,6 +349,15 @@ void CParticle::update (float dt) {
+ 	if (m_particles[readIdx].isAlive ()) {
+ 	    if (writeIdx != readIdx) {
+ 		m_particles[writeIdx] = m_particles[readIdx];
++		// The trail belongs to the particle, so its history row moves too;
++		// otherwise the next particle to land in this slot inherits a stranger's path.
++		if (m_useRopeRenderer && m_useTrailRenderer) {
++		    std::copy_n (
++			m_ropeTrailHistory.begin () + static_cast<size_t> (readIdx) * m_ropeSegments, m_ropeSegments,
++			m_ropeTrailHistory.begin () + static_cast<size_t> (writeIdx) * m_ropeSegments
++		    );
++		    m_ropeTrailFilled[writeIdx] = m_ropeTrailFilled[readIdx];
++		}
+ 	    }
+ 	    writeIdx++;
+ 	}
+@@ -1911,6 +1956,18 @@ void CParticle::updateParticleViewProjection () {
+ void CParticle::updateParticleRenderVars () {
+     m_renderVar0 = glm::vec4 (m_trailLength, m_trailMaxLength, m_trailMinLength, 0.0f);
+ 
++    if (m_useRopeRenderer && m_useTrailRenderer) {
++	// genericropeparticle reads the sampling phase as g_RenderVar0.z and the
++	// sample budget as g_RenderVar0.w; the UV walk is clamped against those.
++	const float phase = m_ropeTrailInterval > 0.0f
++	    ? 1.0f - std::max (m_ropeTrailCountdown, 0.0f) / m_ropeTrailInterval
++	    : 0.0f;
++	const float maxCount = m_ropeUVScrolling
++	    ? static_cast<float> (m_ropeSegments - 1) / ((m_ropeUVScale > 0.0f) ? m_ropeUVScale : 1.0f)
++	    : static_cast<float> (m_ropeSegments) - 0.5f;
++	m_renderVar0 = glm::vec4 (static_cast<float> (m_ropeSegments - 1), 0.0f, phase, maxCount);
++    }
++
+     if (m_spritesheetFrames > 0 && m_spritesheetCols > 0 && m_spritesheetRows > 0) {
+ 	float frameWidth = 1.0f / static_cast<float> (m_spritesheetCols);
+ 	float frameHeight = 1.0f / static_cast<float> (m_spritesheetRows);
+@@ -2095,6 +2152,197 @@ void CParticle::renderSprites () {
+ #endif
+ }
+ 
++void CParticle::sampleRopeTrailHistory (uint32_t first, uint32_t count) {
++    // Newest sample first: shift the row down one slot and drop the oldest.
++    for (uint32_t i = first; i < first + count && i < m_particleCount; i++) {
++	auto row = m_ropeTrailHistory.begin () + static_cast<size_t> (i) * m_ropeSegments;
++	if (m_ropeSegments > 1) {
++	    std::move_backward (row, row + m_ropeSegments - 1, row + m_ropeSegments);
++	}
++	*row = m_particles[i].position;
++	if (m_ropeTrailFilled[i] < m_ropeSegments) {
++	    m_ropeTrailFilled[i]++;
++	}
++	// Every history slot behind a fresh particle repeats its spawn point until
++	// the trail fills up, so a new star draws a short streak instead of a line
++	// reaching back to wherever the pool slot was last used.
++	for (uint16_t k = m_ropeTrailFilled[i]; k < m_ropeSegments; k++) {
++	    row[k] = m_particles[i].position;
++	}
++    }
++}
++
++void CParticle::renderRopeTrail () {
++    if (m_particleCount == 0 || m_pass == nullptr || m_ropeSegments < 2) {
++	return;
++    }
++
++    // One ribbon per particle: its live position followed by its own history.
++    // The shader treats vertex 0 as the head and walks back through the samples,
++    // which is why the trail renders as that particle's path and not as a rope
++    // threaded through every particle of the emitter.
++    uint32_t vertexIndex = 0;
++    uint32_t indexOffset = 0;
++
++    const int subdivision = std::max (1, m_ropeSubdivision);
++    const float uvScale = (m_ropeUVScale > 0.0f) ? m_ropeUVScale : 1.0f;
++
++    // Sampling phase drives the shader's animated fade of the leading quad, and
++    // updateParticleRenderVars hands it over as g_RenderVar0.z.
++
++    const uint32_t pointCount = static_cast<uint32_t> (m_ropeSegments) + 1;
++    const uint32_t totalPoints = (pointCount - 1) * subdivision + 1;
++    m_trailSplinePositions.resize (totalPoints);
++
++    for (uint32_t i = 0; i < m_particleCount; i++) {
++        auto& p = m_particles[i];
++        // A particle that has not moved yet still gets a body: sample count one
++        // would otherwise collapse the whole quad to zero width.
++        const uint16_t filled = std::max<uint16_t> (m_ropeTrailFilled[i], 1);
++        const auto row = m_ropeTrailHistory.begin () + static_cast<size_t> (i) * m_ropeSegments;
++
++        // Points: head, then newest history sample to oldest.
++        auto pointAt = [&] (uint32_t index) -> glm::vec3 {
++            if (index == 0) {
++                return p.position;
++            }
++            const uint32_t sample = std::min<uint32_t> (index - 1, filled - 1);
++            return row[sample];
++        };
++
++        // Catmull-Rom through the head and its history, so the ribbon bends
++        // smoothly along the path the particle took.
++        for (uint32_t segment = 0; segment + 1 < pointCount; segment++) {
++            const glm::vec3 p1 = pointAt (segment);
++            const glm::vec3 p2 = pointAt (segment + 1);
++            const glm::vec3 p0 = segment > 0 ? pointAt (segment - 1) : p1;
++            const glm::vec3 p3 = segment + 2 < pointCount ? pointAt (segment + 2) : p2;
++            for (int k = 0; k < subdivision; k++) {
++                const float t = static_cast<float> (k) / static_cast<float> (subdivision);
++                const float t2 = t * t, t3 = t2 * t;
++                m_trailSplinePositions[segment * subdivision + k]
++                    = 0.5f
++                    * ((2.0f * p1) + (-p0 + p2) * t + (2.0f * p0 - 5.0f * p1 + 4.0f * p2 - p3) * t2
++                       + (-p0 + 3.0f * p1 - 3.0f * p2 + p3) * t3);
++            }
++        }
++        m_trailSplinePositions[totalPoints - 1] = pointAt (pointCount - 1);
++
++        const uint32_t trailSubSegments = totalPoints - 1;
++        // Trail length in sub-segment units, matching how the shader walks UV
++        // space from the head vertex toward the oldest sample.
++        const float trailLength = static_cast<float> (trailSubSegments) / uvScale + 1.0f;
++
++        for (uint32_t s = 0; s < trailSubSegments; s++) {
++            const glm::vec3& posStart = m_trailSplinePositions[s];
++            const glm::vec3& posEnd = m_trailSplinePositions[s + 1];
++            const glm::vec3& posPrev = (s > 0) ? m_trailSplinePositions[s - 1] : posStart;
++            const glm::vec3& posAfter = (s + 2 < totalPoints) ? m_trailSplinePositions[s + 2] : posEnd;
++
++            const float sizeStart = p.size;
++            const float sizeEnd = p.size * std::max (0.0f, 1.0f - static_cast<float> (s) / static_cast<float> (trailSubSegments));
++            const glm::vec4 colorStart (p.color, p.alpha);
++            // Tail fades out along the trail so the streak ends softly.
++            const glm::vec4 colorEnd (p.color, p.alpha * sizeEnd / std::max (p.size, 0.0001f));
++            // Trail position counts sub-segments back from the head.
++            const float trailPosition = static_cast<float> (s);
++
++            auto addTrailVertex = [&] (float uvX, float uvY) {
++                const uint32_t base = vertexIndex * ROPE_FLOATS_PER_VERTEX;
++                m_vertices[base + 0] = posStart.x;
++                m_vertices[base + 1] = posStart.y;
++                m_vertices[base + 2] = posStart.z;
++                m_vertices[base + 3] = sizeStart;
++
++                m_vertices[base + 4] = posEnd.x;
++                m_vertices[base + 5] = posEnd.y;
++                m_vertices[base + 6] = posEnd.z;
++                m_vertices[base + 7] = trailLength;
++
++                m_vertices[base + 8] = posPrev.x;
++                m_vertices[base + 9] = posPrev.y;
++                m_vertices[base + 10] = posPrev.z;
++                m_vertices[base + 11] = trailPosition;
++
++                m_vertices[base + 12] = posAfter.x;
++                m_vertices[base + 13] = posAfter.y;
++                m_vertices[base + 14] = posAfter.z;
++                m_vertices[base + 15] = sizeEnd;
++
++                m_vertices[base + 16] = colorEnd.r;
++                m_vertices[base + 17] = colorEnd.g;
++                m_vertices[base + 18] = colorEnd.b;
++                m_vertices[base + 19] = colorEnd.a;
++
++                m_vertices[base + 20] = uvX;
++                m_vertices[base + 21] = uvY;
++
++                m_vertices[base + 22] = colorStart.r;
++                m_vertices[base + 23] = colorStart.g;
++                m_vertices[base + 24] = colorStart.b;
++                m_vertices[base + 25] = colorStart.a;
++
++                vertexIndex++;
++            };
++
++            const uint32_t baseVertex = vertexIndex;
++            addTrailVertex (0.0f, 0.0f);
++            addTrailVertex (1.0f, 0.0f);
++            addTrailVertex (1.0f, 1.0f);
++            addTrailVertex (0.0f, 1.0f);
++
++            m_indices[indexOffset++] = baseVertex + 0;
++            m_indices[indexOffset++] = baseVertex + 1;
++            m_indices[indexOffset++] = baseVertex + 2;
++            m_indices[indexOffset++] = baseVertex + 2;
++            m_indices[indexOffset++] = baseVertex + 3;
++            m_indices[indexOffset++] = baseVertex + 0;
++        }
++    }
++
++    m_activeIndexCount = static_cast<GLsizei> (indexOffset);
++    if (m_activeIndexCount == 0) {
++	return;
++    }
++
++#if !NDEBUG
++    std::string str = "Rope trail particles ";
++    str += this->getParticle ().name + " (" + std::to_string (this->getId ()) + ")";
++    glPushDebugGroup (GL_DEBUG_SOURCE_APPLICATION, 0, -1, str.c_str ());
++#endif
++
++    glBindBuffer (GL_ARRAY_BUFFER, m_vbo);
++    glBufferData (
++	GL_ARRAY_BUFFER, static_cast<GLsizeiptr> (vertexIndex * ROPE_FLOATS_PER_VERTEX * sizeof (float)),
++	m_vertices.data (), GL_DYNAMIC_DRAW
++    );
++
++    glBindBuffer (GL_ELEMENT_ARRAY_BUFFER, m_ebo);
++    glBufferData (
++	GL_ELEMENT_ARRAY_BUFFER, static_cast<GLsizeiptr> (indexOffset * sizeof (uint32_t)), m_indices.data (),
++	GL_DYNAMIC_DRAW
++    );
++
++    updateMatrices ();
++
++    if (m_hasRefract && m_refractFBO) {
++	auto sceneFBO = getScene ().getFBO ();
++	GLint w = static_cast<GLint> (sceneFBO->getRealWidth ());
++	GLint h = static_cast<GLint> (sceneFBO->getRealHeight ());
++	glBindFramebuffer (GL_READ_FRAMEBUFFER, sceneFBO->getFramebuffer ());
++	glBindFramebuffer (GL_DRAW_FRAMEBUFFER, m_refractFBO->getFramebuffer ());
++	glBlitFramebuffer (0, 0, w, h, 0, 0, w, h, GL_COLOR_BUFFER_BIT, GL_NEAREST);
++    }
++
++    glEnable (GL_DEPTH_CLAMP);
++    m_pass->render ();
++    glDisable (GL_DEPTH_CLAMP);
++
++#if !NDEBUG
++    glPopDebugGroup ();
++#endif
++}
++
+ void CParticle::renderRope () {
+     if (m_particleCount < 2 || m_pass == nullptr) {
+ 	return;
+diff --git a/src/WallpaperEngine/Render/Objects/CParticle.h b/src/WallpaperEngine/Render/Objects/CParticle.h
+index d04194a5..5be41fce 100644
+--- a/src/WallpaperEngine/Render/Objects/CParticle.h
++++ b/src/WallpaperEngine/Render/Objects/CParticle.h
+@@ -163,6 +163,8 @@ protected:
+     // Rendering
+     void renderSprites ();
+     void renderRope ();
++    void renderRopeTrail ();
++    void sampleRopeTrailHistory (uint32_t first, uint32_t count);
+     void setupPass ();
+     void setupGeometryCallbacks ();
+     void setupParticleUniforms ();
+@@ -245,6 +247,17 @@ private:
+     bool m_ropeUVSmoothing { true }; // rope only
+     bool m_uniformLifetimes { false }; // true when lifetime min==max (enables UV smoothing)
+ 
++    // ropetrail keeps one history row per particle, so two trails never get
++    // spliced together when dead particles are compacted out of the pool.
++    // Rows hold `m_ropeSegments` newest-first snapshots of that particle's
++    // position; `m_ropeTrailFilled` counts how many are valid yet.
++    std::vector<glm::vec3> m_ropeTrailHistory;
++    std::vector<uint16_t> m_ropeTrailFilled;
++    float m_ropeTrailInterval { 0.0f };
++    float m_ropeTrailCountdown { 0.0f };
++    // Generated geometry and UVs for each trail are rebuilt per draw.
++    std::vector<glm::vec3> m_trailSplinePositions;
++
+     // Per-vertex float counts for different renderer types
+     static constexpr int SPRITE_FLOATS_PER_VERTEX = 17;
+     static constexpr int ROPE_FLOATS_PER_VERTEX = 26;
