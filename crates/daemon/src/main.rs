@@ -1,5 +1,7 @@
 //! `veild` — the wallpaper daemon.
 
+mod dbus;
+
 use std::io::Write;
 use std::os::raw::{c_int, c_void};
 use std::os::unix::io::AsRawFd;
@@ -206,6 +208,7 @@ fn run(config: Config, config_path: PathBuf) -> Result<(), String> {
 
     let (server, ipc_rx, ipc_tx) = ipc::Server::bind()?;
     log::info!("listening on {}", ipc::socket_path().display());
+    dbus::spawn();
 
     let connection_fd = connection.backend().poll_fd().as_raw_fd();
     let ipc_fd = server.fd();
@@ -322,6 +325,20 @@ fn handle_request(app: &mut App, request: Request) -> String {
                 (Some(path), None) => app.set_wallpaper(Some(path), mode),
                 (None, _) => app.set_wallpaper(None, mode),
             }
+            app.persist();
+            json!({ "ok": true }).to_string()
+        }
+        Request::Next { output } => {
+            let path = app.skip(output, false);
+            json!({ "ok": true, "path": path }).to_string()
+        }
+        Request::Random { output } => {
+            let path = app.skip(output, true);
+            json!({ "ok": true, "path": path }).to_string()
+        }
+        Request::Clear { output } => {
+            app.clear_override(output.as_deref());
+            app.persist();
             json!({ "ok": true }).to_string()
         }
         Request::Reload => {

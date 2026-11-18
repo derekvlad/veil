@@ -1,0 +1,50 @@
+# Maintainer: veil contributors
+#
+# Build from a local checkout:
+#   cd ~/veil && makepkg -si --dir packaging
+#
+# `_repo` must point at the public repository before this file is uploaded to
+# the AUR; `makepkg` clones it instead of using a release tarball.
+
+pkgname=veil-git
+pkgver=0.2.0
+pkgrel=1
+pkgdesc="GPU-decoded video wallpapers for wlr-layer-shell Wayland compositors"
+arch=('x86_64' 'aarch64')
+url="https://github.com/veil-wallpaper/veil"
+license=('MIT')
+depends=('mpv' 'libglvnd' 'gtk4' 'libadwaita')
+makedepends=('cargo' 'rust' 'pkgconf')
+provides=('veil')
+conflicts=('veil')
+options=('!lto')
+_repo="https://github.com/veil-wallpaper/veil"
+source=("git+$_repo.git")
+sha256sums=('SKIP')
+
+pkgver() {
+    cd veil
+    printf 'r%s.%s' "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
+}
+
+build() {
+    cd veil
+    export RUSTUP_TOOLCHAIN="${RUSTUP_TOOLCHAIN:-stable}"
+    cargo build --release --workspace --locked
+}
+
+package() {
+    cd veil
+    install -Dm755 target/release/veild "$pkgdir/usr/bin/veild"
+    install -Dm755 target/release/veilctl "$pkgdir/usr/bin/veilctl"
+    install -Dm755 target/release/veil-gui "$pkgdir/usr/bin/veil-gui"
+
+    install -Dm644 packaging/org.veil.Veil.desktop \
+        "$pkgdir/usr/share/applications/org.veil.Veil.desktop"
+    install -Dm644 packaging/icons/org.veil.Veil.svg \
+        "$pkgdir/usr/share/icons/hicolor/scalable/apps/org.veil.Veil.svg"
+    install -Dm644 packaging/veil.service \
+        "$pkgdir/usr/lib/systemd/user/veil.service"
+    install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+    install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+}

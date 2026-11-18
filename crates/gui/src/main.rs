@@ -134,6 +134,9 @@ fn load_css() {
             font-size: 0.85em;
             opacity: 0.65;
         }
+        .monitor-row {
+            padding: 6px 10px;
+        }
         .empty-icon {
             opacity: 0.5;
         }
@@ -168,13 +171,24 @@ struct AppState {
     count_label: gtk::Label,
     monitor_dd: gtk::DropDown,
     monitors: RefCell<Vec<String>>,
+    monitor_list: gtk::ListBox,
+    monitor_signature: RefCell<String>,
     mode_dd: gtk::DropDown,
     cards: RefCell<Vec<Card>>,
     status_label: gtk::Label,
     daemon_button: gtk::Button,
     pause_button: gtk::Button,
+    next_button: gtk::Button,
     search: gtk::SearchEntry,
     library_label: gtk::Label,
+    span_switch: gtk::Switch,
+    playlist_switch: gtk::Switch,
+    playlist_interval: gtk::SpinButton,
+    playlist_shuffle: gtk::Switch,
+    playlist_fade: gtk::SpinButton,
+    playlist_label: gtk::Label,
+    file_monitor: RefCell<Option<gio::FileMonitor>>,
+    refresh_scheduled: Cell<bool>,
     thumb_tx: mpsc::Sender<(String, library::Probe)>,
     ready: Cell<bool>,
 }
@@ -238,6 +252,14 @@ fn build_window(app: &adw::Application) {
     pause_button.set_tooltip_text(Some(t("Pause / resume", "Пауза / продолжить")));
     header.pack_end(&pause_button);
 
+    let next_button = gtk::Button::from_icon_name("media-skip-forward-symbolic");
+    next_button.add_css_class("flat");
+    next_button.set_tooltip_text(Some(t(
+        "Next wallpaper (this monitor, or all)",
+        "Следующие обои (этот экран или все)",
+    )));
+    header.pack_end(&next_button);
+
     let menu = gtk::gio::Menu::new();
     menu.append(
         Some(t("Refresh library", "Обновить библиотеку")),
@@ -263,11 +285,27 @@ fn build_window(app: &adw::Application) {
     header.pack_end(&menu_button);
 
     // ---------------------------------------------------------------- sidebar
-    let sidebar_inner = gtk::Box::new(gtk::Orientation::Vertical, 16);
-    sidebar_inner.set_margin_top(18);
-    sidebar_inner.set_margin_bottom(18);
+    let sidebar_inner = gtk::Box::new(gtk::Orientation::Vertical, 8);
+    sidebar_inner.set_margin_top(10);
+    sidebar_inner.set_margin_bottom(10);
     sidebar_inner.set_margin_start(18);
     sidebar_inner.set_margin_end(18);
+
+    // Status sits at the top: the sidebar is scrollable, and the daemon state
+    // is the first thing a user needs to see.
+    let status_box = gtk::Box::new(gtk::Orientation::Vertical, 8);
+    status_box.add_css_class("sidebar-status");
+    let status_label = gtk::Label::new(Some(t("Checking the daemon…", "Проверяю демон…")));
+    status_label.set_wrap(true);
+    status_label.set_xalign(0.0);
+    status_label.add_css_class("caption");
+    status_label.add_css_class("dim-label");
+    let daemon_button = gtk::Button::with_label(t("Start the daemon", "Запустить демон"));
+    daemon_button.add_css_class("suggested-action");
+    daemon_button.set_visible(false);
+    status_box.append(&status_label);
+    status_box.append(&daemon_button);
+    sidebar_inner.append(&status_box);
 
     sidebar_inner.append(&section_title(t("Screen", "Экран")));
     let monitor_dd = gtk::DropDown::from_strings(&[t("All monitors", "Все мониторы")]);
@@ -276,6 +314,25 @@ fn build_window(app: &adw::Application) {
         "Следующие обои применятся к этому экрану",
     )));
     sidebar_inner.append(&monitor_dd);
+
+    let monitor_list = gtk::ListBox::new();
+    monitor_list.set_selection_mode(gtk::SelectionMode::None);
+    monitor_list.add_css_class("boxed-list");
+    monitor_list.set_tooltip_text(Some(t(
+        "Connected monitors and their own wallpapers",
+        "Подключённые экраны и их собственные обои",
+    )));
+    sidebar_inner.append(&monitor_list);
+
+    let (span_row, span_switch) = switch_row(
+        t("Span across monitors", "Один кадр на все экраны"),
+        t(
+            "Stretch one picture over the whole desktop",
+            "Растянуть одну картинку на весь рабочий стол",
+        ),
+        config.wallpaper.span,
+    );
+    sidebar_inner.append(&span_row);
 
     sidebar_inner.append(&section_title(t("Fill mode", "Заполнение")));
     let mode_labels = [
@@ -361,23 +418,79 @@ fn build_window(app: &adw::Application) {
     library_buttons.append(&random_button);
     sidebar_inner.append(&library_buttons);
 
+    sidebar_inner.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
+    sidebar_inner.append(&section_title(t("Playlist", "Плейлист")));
+
+    let (playlist_row, playlist_switch) = switch_row(
+        t("Change automatically", "Менять автоматически"),
+        t(
+            "Empty list = every wallpaper in the library",
+            "Пустой список = все обои из библиотеки",
+        ),
+        config.playlist.enabled,
+    );
+    sidebar_inner.append(&playlist_row);
+
+    let interval_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let interval_caption = gtk::Label::new(Some(t("Every, seconds", "Интервал, секунд")));
+    interval_caption.add_css_class("caption");
+    interval_caption.add_css_class("dim-label");
+    interval_caption.set_hexpand(true);
+    interval_caption.set_halign(gtk::Align::Start);
+    let playlist_interval = gtk::SpinButton::with_range(10.0, 86400.0, 10.0);
+    playlist_interval.set_value(config.playlist.interval_secs.max(10) as f64);
+    playlist_interval.set_numeric(true);
+    playlist_interval.set_sensitive(config.playlist.enabled);
+    interval_row.append(&interval_caption);
+    interval_row.append(&playlist_interval);
+    sidebar_inner.append(&interval_row);
+
+    let (shuffle_row, playlist_shuffle) = switch_row(
+        t("Shuffle", "В случайном порядке"),
+        t(
+            "Pick random files instead of a sequence",
+            "Выбирать файлы случайно",
+        ),
+        config.playlist.shuffle,
+    );
+    sidebar_inner.append(&shuffle_row);
+
+    let fade_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let fade_caption = gtk::Label::new(Some(t("Fade in, seconds", "Появление, секунд")));
+    fade_caption.add_css_class("caption");
+    fade_caption.add_css_class("dim-label");
+    fade_caption.set_hexpand(true);
+    fade_caption.set_halign(gtk::Align::Start);
+    let playlist_fade = gtk::SpinButton::with_range(0.0, 5.0, 0.2);
+    playlist_fade.set_digits(1);
+    playlist_fade.set_value(config.playlist.fade_secs.clamp(0.0, 5.0));
+    playlist_fade.set_numeric(true);
+    fade_row.append(&fade_caption);
+    fade_row.append(&playlist_fade);
+    sidebar_inner.append(&fade_row);
+
+    let playlist_label = gtk::Label::new(None);
+    playlist_label.add_css_class("library-path");
+    playlist_label.set_wrap(true);
+    playlist_label.set_xalign(0.0);
+    sidebar_inner.append(&playlist_label);
+
+    let playlist_buttons = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let playlist_next = gtk::Button::with_label(t("Next now", "Следующие сейчас"));
+    playlist_next.add_css_class("flat");
+    playlist_buttons.append(&playlist_next);
+    let playlist_clear = gtk::Button::with_label(t("Use whole library", "Вся библиотека"));
+    playlist_clear.add_css_class("flat");
+    playlist_clear.set_tooltip_text(Some(t(
+        "Forget pinned files and per-monitor playlists",
+        "Забыть закреплённые файлы и списки экранов",
+    )));
+    playlist_buttons.append(&playlist_clear);
+    sidebar_inner.append(&playlist_buttons);
+
     let spacer = gtk::Box::new(gtk::Orientation::Vertical, 0);
     spacer.set_vexpand(true);
     sidebar_inner.append(&spacer);
-
-    let status_box = gtk::Box::new(gtk::Orientation::Vertical, 8);
-    status_box.add_css_class("sidebar-status");
-    let status_label = gtk::Label::new(Some(t("Checking the daemon…", "Проверяю демон…")));
-    status_label.set_wrap(true);
-    status_label.set_xalign(0.0);
-    status_label.add_css_class("caption");
-    status_label.add_css_class("dim-label");
-    let daemon_button = gtk::Button::with_label(t("Start the daemon", "Запустить демон"));
-    daemon_button.add_css_class("suggested-action");
-    daemon_button.set_visible(false);
-    status_box.append(&status_label);
-    status_box.append(&daemon_button);
-    sidebar_inner.append(&status_box);
 
     let sidebar_scroll = gtk::ScrolledWindow::builder()
         .hscrollbar_policy(gtk::PolicyType::Never)
@@ -492,13 +605,24 @@ fn build_window(app: &adw::Application) {
         count_label,
         monitor_dd,
         monitors: RefCell::new(Vec::new()),
+        monitor_list,
+        monitor_signature: RefCell::new(String::new()),
         mode_dd,
         cards: RefCell::new(Vec::new()),
         status_label,
         daemon_button,
         pause_button,
+        next_button,
         search,
         library_label,
+        span_switch,
+        playlist_switch,
+        playlist_interval,
+        playlist_shuffle,
+        playlist_fade,
+        playlist_label,
+        file_monitor: RefCell::new(None),
+        refresh_scheduled: Cell::new(false),
         thumb_tx,
         ready: Cell::new(false),
     });
@@ -579,6 +703,81 @@ fn build_window(app: &adw::Application) {
         move |_| {
             let _ = ipc::call(&Request::Toggle);
             refresh_status(&state);
+        }
+    });
+    state.next_button.connect_clicked({
+        let state = state.clone();
+        move |_| skip_playlist(&state, false)
+    });
+    playlist_next.connect_clicked({
+        let state = state.clone();
+        move |_| skip_playlist(&state, false)
+    });
+    state.span_switch.connect_active_notify({
+        let state = state.clone();
+        move |switch| {
+            if !state.ready.get() {
+                return;
+            }
+            state.cfg.borrow_mut().wallpaper.span = switch.is_active();
+            state.push_settings();
+            refresh_status(&state);
+        }
+    });
+    state.playlist_switch.connect_active_notify({
+        let state = state.clone();
+        move |switch| {
+            if !state.ready.get() {
+                return;
+            }
+            let enabled = switch.is_active();
+            state.cfg.borrow_mut().playlist.enabled = enabled;
+            state.playlist_interval.set_sensitive(enabled);
+            state.push_settings();
+            update_playlist_label(&state);
+        }
+    });
+    state.playlist_interval.connect_value_changed({
+        let state = state.clone();
+        move |spin| {
+            if !state.ready.get() {
+                return;
+            }
+            state.cfg.borrow_mut().playlist.interval_secs = spin.value() as u64;
+            state.push_settings();
+            update_playlist_label(&state);
+        }
+    });
+    state.playlist_shuffle.connect_active_notify({
+        let state = state.clone();
+        move |switch| {
+            if !state.ready.get() {
+                return;
+            }
+            state.cfg.borrow_mut().playlist.shuffle = switch.is_active();
+            state.push_settings();
+        }
+    });
+    state.playlist_fade.connect_value_changed({
+        let state = state.clone();
+        move |spin| {
+            if !state.ready.get() {
+                return;
+            }
+            state.cfg.borrow_mut().playlist.fade_secs = spin.value();
+            state.push_settings();
+        }
+    });
+    playlist_clear.connect_clicked({
+        let state = state.clone();
+        move |_| {
+            {
+                let mut cfg = state.cfg.borrow_mut();
+                cfg.playlist.items.clear();
+                cfg.playlist.outputs.clear();
+            }
+            state.push_settings();
+            update_playlist_label(&state);
         }
     });
     state.search.connect_search_changed({
@@ -682,10 +881,19 @@ fn build_window(app: &adw::Application) {
         });
     }
 
+    install_drop_target(&state);
+    watch_library(&state);
+
     state.ready.set(true);
     rebuild_library(&state);
+    update_playlist_label(&state);
     refresh_status(&state);
     window.present();
+
+    // GTK scrolls the sidebar to the first focusable child, which would hide
+    // the monitor list on short windows. Start at the top instead.
+    let adjust = sidebar_scroll.vadjustment();
+    glib::idle_add_local_once(move || adjust.set_value(0.0));
 }
 
 // ------------------------------------------------------------------ utilities
@@ -869,16 +1077,44 @@ fn build_card(state: &Rc<AppState>, entry: &library::Entry) -> Card {
         }
     });
 
-    // Right click: a tiny popover with "remove from library".
+    // Right click: pin to the playlist or remove from the library.
     let popover = gtk::Popover::new();
     popover.set_has_arrow(false);
+    let menu = gtk::Box::new(gtk::Orientation::Vertical, 2);
+    let pinned = playlist_contains(state, &path);
+    let pin = gtk::Button::builder()
+        .label(if pinned {
+            t("Remove from playlist", "Убрать из плейлиста")
+        } else {
+            t("Add to playlist", "Добавить в плейлист")
+        })
+        .icon_name(if pinned {
+            "starred-symbolic"
+        } else {
+            "non-starred-symbolic"
+        })
+        .has_frame(false)
+        .build();
+    menu.append(&pin);
     let remove = gtk::Button::builder()
         .label(t("Remove from library", "Удалить из библиотеки"))
         .icon_name("user-trash-symbolic")
         .has_frame(false)
         .build();
-    popover.set_child(Some(&remove));
+    menu.append(&remove);
+    popover.set_child(Some(&menu));
     popover.set_parent(&button);
+    pin.connect_clicked({
+        let weak = Rc::downgrade(state);
+        let popover = popover.clone();
+        let path = path.clone();
+        move |_| {
+            popover.popdown();
+            if let Some(state) = weak.upgrade() {
+                pin_to_playlist(&state, &path, !pinned);
+            }
+        }
+    });
     remove.connect_clicked({
         let weak = Rc::downgrade(state);
         let popover = popover.clone();
@@ -977,6 +1213,324 @@ fn filter_cards(state: &AppState, query: &str) {
     }
 }
 
+// ------------------------------------------------------------------- playlist
+
+fn skip_playlist(state: &Rc<AppState>, random: bool) {
+    let output = selected_monitor(state);
+    let request = if random {
+        Request::Random { output }
+    } else {
+        Request::Next { output }
+    };
+    match ipc::call(&request) {
+        Ok(value) => {
+            if let Some(path) = value["path"].as_str() {
+                state.toast(&format!(
+                    "{}: {}",
+                    t("Now playing", "Сейчас"),
+                    file_name(Path::new(path))
+                ));
+            }
+        }
+        Err(error) => state.toast(&error),
+    }
+    refresh_status(state);
+}
+
+fn update_playlist_label(state: &AppState) {
+    let cfg = state.cfg.borrow();
+    let pinned = cfg.playlist.items.len();
+    let library = if pinned == 0 {
+        library::scan(&cfg.library_path()).len()
+    } else {
+        0
+    };
+    let per_output = cfg
+        .playlist
+        .outputs
+        .values()
+        .filter(|list| !list.is_empty())
+        .count();
+
+    let mut text = if pinned == 0 {
+        format!(
+            "{} {}",
+            files_text(library),
+            t("in the library", "в библиотеке")
+        )
+    } else {
+        format!(
+            "{} {}",
+            files_text(pinned),
+            t("pinned to the playlist", "закреплено в плейлисте")
+        )
+    };
+    if per_output > 0 {
+        text.push_str(&format!(
+            " · {} {}",
+            per_output,
+            t("monitor lists", "списка экранов")
+        ));
+    }
+    state.playlist_label.set_text(&text);
+}
+
+fn pin_to_playlist(state: &Rc<AppState>, path: &str, pin: bool) {
+    {
+        let mut cfg = state.cfg.borrow_mut();
+        if pin {
+            if cfg.playlist.items.is_empty() {
+                // Empty means "the whole library". Materialise it first so
+                // that pinning one file does not silently drop the others.
+                cfg.playlist.items = library::scan(&cfg.library_path())
+                    .iter()
+                    .map(|entry| entry.path.to_string_lossy().into_owned())
+                    .collect();
+            }
+            if !cfg.playlist.items.iter().any(|item| item == path) {
+                cfg.playlist.items.push(path.to_string());
+            }
+        } else {
+            cfg.playlist.items.retain(|item| item != path);
+        }
+    }
+    state.push_settings();
+    update_playlist_label(state);
+    rebuild_library(state);
+}
+
+fn playlist_contains(state: &AppState, path: &str) -> bool {
+    state
+        .cfg
+        .borrow()
+        .playlist
+        .items
+        .iter()
+        .any(|item| item == path)
+}
+
+// ------------------------------------------------------------------ drop/watch
+
+fn import_files(state: &Rc<AppState>, paths: &[PathBuf]) {
+    let library = state.cfg.borrow().library_path();
+    let mut added = 0usize;
+    let mut errors = Vec::new();
+    for path in paths {
+        if path.starts_with(&library) {
+            continue;
+        }
+        match library::import(path, &library) {
+            Ok(_) => added += 1,
+            Err(error) => errors.push(error),
+        }
+    }
+    for error in errors.iter().take(3) {
+        eprintln!("veil-gui: {error}");
+    }
+    if added > 0 {
+        rebuild_library(state);
+        state.toast(&format!(
+            "{}: {added}",
+            t("Added to the library", "Добавлено в библиотеку")
+        ));
+    } else if let Some(error) = errors.first() {
+        state.toast(error);
+    }
+}
+
+fn install_drop_target(state: &Rc<AppState>) {
+    let drop = gtk::DropTarget::new(
+        gtk::gdk::FileList::static_type(),
+        gtk::gdk::DragAction::COPY,
+    );
+    drop.connect_drop({
+        let weak = Rc::downgrade(state);
+        move |_, value, _, _| {
+            let Ok(files) = value.get::<gtk::gdk::FileList>() else {
+                return false;
+            };
+            let Some(state) = weak.upgrade() else {
+                return false;
+            };
+            let paths: Vec<PathBuf> = files
+                .files()
+                .iter()
+                .filter_map(|file| file.path())
+                .collect();
+            let supported = paths
+                .iter()
+                .filter(|path| library::is_supported(path))
+                .count();
+            if supported == 0 {
+                state.toast(t(
+                    "Drop a video or an image",
+                    "Перетащите видео или картинку",
+                ));
+                return false;
+            }
+            import_files(&state, &paths);
+            true
+        }
+    });
+    state.window.add_controller(drop);
+}
+
+fn schedule_refresh(state: &Rc<AppState>) {
+    if state.refresh_scheduled.replace(true) {
+        return;
+    }
+    let weak = Rc::downgrade(state);
+    glib::timeout_add_local_once(Duration::from_millis(400), move || {
+        if let Some(state) = weak.upgrade() {
+            state.refresh_scheduled.set(false);
+            rebuild_library(&state);
+            update_playlist_label(&state);
+        }
+    });
+}
+
+fn watch_library(state: &Rc<AppState>) {
+    let dir = state.cfg.borrow().library_path();
+    let _ = std::fs::create_dir_all(&dir);
+    let file = gio::File::for_path(&dir);
+    let monitor = file
+        .monitor_directory(gio::FileMonitorFlags::NONE, gio::Cancellable::NONE)
+        .ok();
+    if let Some(monitor) = &monitor {
+        let weak = Rc::downgrade(state);
+        monitor.connect_changed(move |_, _, _, _| {
+            if let Some(state) = weak.upgrade() {
+                schedule_refresh(&state);
+            }
+        });
+    }
+    *state.file_monitor.borrow_mut() = monitor;
+}
+
+// -------------------------------------------------------------------- monitors
+
+fn sync_monitor_rows(state: &Rc<AppState>, outputs: &[serde_json::Value]) {
+    let mut signature = String::new();
+    for output in outputs {
+        signature.push_str(output["name"].as_str().unwrap_or(""));
+        signature.push('|');
+        signature.push_str(output["path"].as_str().unwrap_or(""));
+        signature.push('|');
+        signature.push_str(if output["override"].as_bool().unwrap_or(false) {
+            "1"
+        } else {
+            "0"
+        });
+        signature.push_str(&format!(
+            "|{}x{}\n",
+            output["logical"]["width"].as_u64().unwrap_or(0),
+            output["logical"]["height"].as_u64().unwrap_or(0)
+        ));
+    }
+    if signature == *state.monitor_signature.borrow() {
+        return;
+    }
+    *state.monitor_signature.borrow_mut() = signature;
+
+    while let Some(child) = state.monitor_list.first_child() {
+        state.monitor_list.remove(&child);
+    }
+
+    for output in outputs {
+        let name = output["name"].as_str().unwrap_or("?").to_string();
+        let width = output["logical"]["width"].as_u64().unwrap_or(0);
+        let height = output["logical"]["height"].as_u64().unwrap_or(0);
+        let path = output["path"].as_str().unwrap_or("");
+        let overridden = output["override"].as_bool().unwrap_or(false);
+
+        let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        row.add_css_class("monitor-row");
+
+        let text = gtk::Box::new(gtk::Orientation::Vertical, 1);
+        text.set_hexpand(true);
+        let title = gtk::Label::new(Some(&if width > 0 {
+            format!("{name} · {width}×{height}")
+        } else {
+            name.clone()
+        }));
+        title.set_xalign(0.0);
+        title.add_css_class("caption");
+        let display_name = if path.is_empty() {
+            "—".to_string()
+        } else {
+            file_name(Path::new(path))
+        };
+        let file = gtk::Label::new(Some(&display_name));
+        file.set_xalign(0.0);
+        file.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
+        file.set_width_chars(1);
+        file.set_max_width_chars(28);
+        file.add_css_class("dim-label");
+        if !path.is_empty() {
+            file.set_tooltip_text(Some(path));
+        }
+        text.append(&title);
+        text.append(&file);
+        row.append(&text);
+
+        if overridden {
+            let badge = gtk::Label::new(Some(t("own", "свои")));
+            badge.add_css_class("badge");
+            badge.set_valign(gtk::Align::Center);
+            row.append(&badge);
+        }
+
+        let reset = gtk::Button::from_icon_name("edit-clear-symbolic");
+        reset.add_css_class("flat");
+        reset.set_valign(gtk::Align::Center);
+        reset.set_tooltip_text(Some(t(
+            "Use the global wallpaper on this monitor",
+            "Вернуть общие обои на этот экран",
+        )));
+        reset.set_visible(overridden);
+        reset.connect_clicked({
+            let weak = Rc::downgrade(state);
+            let name = name.clone();
+            move |_| {
+                let Some(state) = weak.upgrade() else {
+                    return;
+                };
+                state.cfg.borrow_mut().outputs.remove(&name);
+                state.save_config();
+                let _ = ipc::call(&Request::Clear {
+                    output: Some(name.clone()),
+                });
+                refresh_status(&state);
+            }
+        });
+        row.append(&reset);
+
+        // Clicking the row selects the monitor for the next wallpaper.
+        let click = gtk::GestureClick::new();
+        click.set_button(1);
+        click.connect_released({
+            let weak = Rc::downgrade(state);
+            let name = name.clone();
+            move |_, _, _, _| {
+                let Some(state) = weak.upgrade() else {
+                    return;
+                };
+                let index = state
+                    .monitors
+                    .borrow()
+                    .iter()
+                    .position(|item| item == &name);
+                if let Some(index) = index {
+                    state.monitor_dd.set_selected(index as u32 + 1);
+                }
+            }
+        });
+        row.add_controller(click);
+
+        state.monitor_list.append(&row);
+    }
+}
+
 // ---------------------------------------------------------------------- apply
 
 fn apply_wallpaper(state: &Rc<AppState>, path: &Path) {
@@ -989,6 +1543,8 @@ fn apply_wallpaper(state: &Rc<AppState>, path: &Path) {
         cfg.wallpaper.mode = mode;
         match &target {
             Some(output) => {
+                // A per-monitor picture implies leaving span mode.
+                cfg.wallpaper.span = false;
                 cfg.outputs.insert(output.clone(), path_str.clone());
             }
             None => {
@@ -998,6 +1554,9 @@ fn apply_wallpaper(state: &Rc<AppState>, path: &Path) {
         }
     }
     state.save_config();
+    if target.is_some() {
+        state.span_switch.set_active(false);
+    }
 
     let request = Request::Set {
         path: Some(path_str.clone()),
@@ -1095,9 +1654,20 @@ fn refresh_status(state: &Rc<AppState>) {
             if paused {
                 parts.push(t("paused", "пауза").to_string());
             }
+            if value["playlist"]["enabled"].as_bool().unwrap_or(false) {
+                let seconds = value["playlist"]["next_in_secs"].as_u64().unwrap_or(0);
+                parts.push(format!(
+                    "{} {}",
+                    t("next in", "следующие через"),
+                    format_duration(seconds as f64)
+                ));
+            }
             state.status_label.set_text(&parts.join(" · "));
 
+            let outputs_json = value["outputs"].as_array().cloned().unwrap_or_default();
+            state.span_switch.set_sensitive(outputs_json.len() > 1);
             sync_monitors(state, &names);
+            sync_monitor_rows(state, &outputs_json);
             update_badges(state, &active);
         }
         Err(_) => {
@@ -1106,6 +1676,8 @@ fn refresh_status(state: &Rc<AppState>) {
                 .set_text(t("Daemon is not running", "Демон не запущен"));
             state.daemon_button.set_visible(true);
             state.pause_button.set_sensitive(false);
+            state.span_switch.set_sensitive(false);
+            sync_monitor_rows(state, &[]);
             update_badges(state, &[]);
         }
     }
@@ -1246,7 +1818,9 @@ fn choose_folder(state: &Rc<AppState>) {
             };
             state.cfg.borrow_mut().library.path = path.to_string_lossy().into_owned();
             state.save_config();
+            watch_library(&state);
             rebuild_library(&state);
+            update_playlist_label(&state);
         },
     );
 }

@@ -59,7 +59,15 @@ niri, и в KDE, и в GNOME:
 
 * библиотека обоев сеткой с постерами, разрешением и длительностью;
 * клик по обоям применяет их на выбранный экран («Все мониторы» или конкретный);
+* панель мониторов: разрешение, текущий файл и отметка «свои» для экранов с
+  собственными обоями, сброс в один клик;
 * режимы `fill`, `fit`, `stretch`, `center` — применяются сразу;
+* «Один кадр на все экраны» — одна картинка растягивается на весь рабочий стол,
+  каждый монитор показывает свою часть без искажений;
+* плейлист: автосмена с интервалом, случайный порядок, плавное появление,
+  закрепление файлов правым кликом (пустой список = вся библиотека);
+* перетаскивание видео и картинок прямо в окно — файлы копируются в библиотеку;
+* папка библиотеки отслеживается: новые файлы появляются в сетке сами;
 * «Добавить» копирует видео или картинку в библиотеку
   (`~/.local/share/veil/wallpapers`), правый клик — «Удалить из библиотеки»
   (файл уходит в корзину);
@@ -71,6 +79,70 @@ niri, и в KDE, и в GNOME:
 Интерфейс на русском или английском — по `LANG`. Постеры для сетки делает
 `ffmpeg` и кэширует в `~/.cache/veil/thumbs`; без ffmpeg GUI работает, но
 показывает иконки вместо кадров.
+
+## Плейлист и один кадр на все экраны
+
+Плейлист живёт в конфиге и не зависит от GUI. По умолчанию он берёт все файлы
+из библиотеки; `[playlist.outputs]` задаёт отдельные списки для конкретных
+мониторов. Мониторы без своего списка меняют обои синхронно, со своим — живут
+отдельно.
+
+```toml
+[playlist]
+enabled = true
+interval_secs = 300     # минимум 5
+shuffle = true
+fade_secs = 1.2         # появление из чёрного, 0 — выключить
+items = []              # пусто = вся библиотека
+
+[playlist.outputs]
+"DP-1" = ["/home/user/Videos/left.mp4"]
+```
+
+Смена не переписывает конфиг: `wallpaper.path` остаётся тем, что выбрал
+пользователь, а текущий файл идёт в `veilctl status` и в GUI.
+
+Span (`wallpaper.span = true`) включает режим «один кадр на все экраны». Каждый
+монитор по-прежнему декодирует своё, но mpv показывает нужный кусок общей
+картинки: вычисляется общий bounding box мониторов, видео масштабируется под
+него, а `video-zoom`/`video-pan-x`/`video-pan-y` сдвигают кадр на каждом экране.
+Так 21:9-клип покрывает два 16:9-монитора без полос и растяжения. Индивидуальные
+обои при этом игнорируются; выбор обоев для одного монитора выключает span.
+
+## D-Bus
+
+Демон поднимает `org.veil.Veild` на `/org/veil/Veil` (отдельное имя, потому что
+`org.veil.Veil` занято самим GUI как GApplication id):
+
+```sh
+busctl --user call org.veil.Veild /org/veil/Veil org.veil.Veil Next
+busctl --user call org.veil.Veild /org/veil/Veil org.veil.Veil Random
+busctl --user call org.veil.Veild /org/veil/Veil org.veil.Veil Toggle
+busctl --user get-property org.veil.Veild /org/veil/Veil org.veil.Veil PlaybackStatus
+```
+
+Методы: `Pause`, `Resume`, `Toggle`, `Next`, `Random`, `Status` (JSON).
+Свойства: `PlaybackStatus` (`Playing`/`Paused`), `Version`. Если сессионной шины
+нет, демон просто пишет предупреждение и работает дальше.
+
+## Виджет Noctalia
+
+В баре Noctalia достаточно CustomButton: левый клик — пауза, средний — следующее
+обои, правый — окно выбора. В `~/.local/state/noctalia/settings.toml`:
+
+```toml
+[widget.veil]
+type = "custom_button"
+glyph = "movie"
+
+[widget.veil.actions]
+left = "exec veilctl toggle"
+middle = "exec veilctl next"
+right = "exec veil-gui"
+```
+
+После правки — `noctalia config validate && noctalia msg config-reload`.
+
 
 ## Совместимость
 
@@ -114,13 +186,26 @@ sudo pacman -S rust mpv gtk4 libadwaita ffmpeg
 Структура репозитория:
 
 ```
-crates/core     библиотека veil: EGL, mpv, layer-shell, конфиг, IPC
-crates/daemon   veild — фоновый демон
+crates/core     библиотека veil: EGL, mpv, layer-shell, конфиг, IPC, span, D-Bus-клиент
+crates/daemon   veild — фоновый демон и сервис org.veil.Veild
 crates/ctl      veilctl — управление из терминала и скриптов
 crates/gui      veil-gui — GTK4-выбор обоев
-packaging       desktop-файл, иконка, systemd unit
+packaging       desktop-файл, иконка, systemd unit, PKGBUILD
 plugins         KDE-плагин и заметки про GNOME
+.github         CI: fmt, тесты и release-сборка в контейнере Arch
 ```
+
+Проверки:
+
+```sh
+cargo fmt --all -- --check
+cargo test --workspace
+```
+
+Тесты покрывают разбор и round-trip конфига, serde-формат IPC, выбор файлов
+плейлиста и математику span (bounding box, zoom/pan для двух экранов,
+панорамный исходник, вырожденные значения). Для AUR есть
+`packaging/PKGBUILD` (пакет `veil-git`).
 
 ## Использование
 
@@ -129,6 +214,11 @@ veil-gui                                # выбрать обои мышкой
 veilctl set ~/Videos/wallpaper.mp4      # поставить видео
 veilctl set ~/Pictures/photo.png        # или картинку
 veilctl set clip.mp4 --output DP-1      # только на один монитор
+veilctl next [--output DP-1]            # следующее обои плейлиста
+veilctl random [--output DP-1]          # случайное из плейлиста
+veilctl clear [--output DP-1]           # снять индивидуальные обои
+veilctl span on|off|toggle              # один кадр на все экраны
+veilctl playlist on|off|toggle          # автосмена
 veilctl status                          # мониторы, декодер, кадры, пауза
 veilctl pause | resume | toggle
 veilctl reload                          # перечитать конфиг
@@ -154,6 +244,7 @@ veilctl quit
 path = "/home/user/.local/share/veil/wallpapers/wallpaper.mp4"
 mode = "fill"          # fill | fit | stretch | center
 color = "#000000"
+span = false           # один кадр на все мониторы
 
 [playback]
 hwdec = "auto-safe"    # auto-safe | vaapi | vaapi-copy | vulkan | no
@@ -173,9 +264,22 @@ pause_on_battery = false
 [library]
 path = "~/.local/share/veil/wallpapers"
 
+[playlist]
+enabled = false
+interval_secs = 300
+shuffle = true
+fade_secs = 1.2
+items = []
+
+[playlist.outputs]
+# "DP-1" = ["/home/user/Videos/left.mp4"]
+
 [outputs]
 "HDMI-A-1" = "/home/user/Videos/second.mp4"
 ```
+
+`veilctl set` и `veilctl clear` сами сохраняют конфиг, поэтому их результат
+переживает перезапуск демона. Автосмена, наоборот, ничего не пишет на диск.
 
 Изменения применяются по `veilctl reload` или `kill -HUP $(pidof veild)`.
 Монитор можно указать и в `veilctl set ... --output`. GUI пишет этот файл сам,
@@ -223,8 +327,8 @@ systemctl --user enable --now veil.service
 
 * дробное масштабирование (`wp_fractional_scale` + viewporter)
 * расширение GNOME Shell
-* плейлисты и смена обоев по расписанию
 * тонкая настройка пауз (по приложению, по видеозвонкам)
+* полноценный кроссфейд между двумя mpv-плеерами
 
 ## Лицензия
 

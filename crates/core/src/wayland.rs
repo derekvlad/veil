@@ -4,9 +4,11 @@
 //! sway and friends. Compositors that do not expose a background layer to
 //! external clients (KDE Plasma, GNOME) need their own plugin — see `plugins/`.
 
+use std::collections::BTreeMap;
 use std::os::raw::c_void;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use khronos_egl as egl;
 use wayland_client::protocol::{
@@ -37,10 +39,17 @@ use wayland_protocols_wlr::{
 use crate::config::{Config, Mode};
 use crate::egl::Egl;
 use crate::mpv::Player;
+use crate::span::{self, Rect, Transform};
 
 /// Index of an output in [`App::outputs`], used as Wayland object data.
 #[derive(Debug, Clone, Copy)]
 pub struct Slot(pub usize);
+
+/// A fade-in that is driven by the daemon's tick.
+pub struct Fade {
+    started: Instant,
+    secs: f64,
+}
 
 pub struct Output {
     pub alive: bool,
@@ -48,6 +57,8 @@ pub struct Output {
     pub name: String,
     pub wl: WlOutput,
     pub scale: i32,
+    /// Position in the compositor's logical layout, from wl_output.geometry.
+    pub position: (i32, i32),
     pub surface: Option<WlSurface>,
     pub layer: Option<ZwlrLayerSurfaceV1>,
     pub egl_window: Option<WlEglSurface>,
@@ -59,6 +70,11 @@ pub struct Output {
     pub logical: (i32, i32),
     pub pixels: (i32, i32),
     pub configured: bool,
+    /// File currently loaded in the player (playlist changes are not saved).
+    pub current: String,
+    pub fade: Option<Fade>,
+    /// Span transform currently applied to the player, if any.
+    pub span_applied: Option<Transform>,
 }
 
 impl Output {
@@ -69,6 +85,7 @@ impl Output {
             name,
             wl,
             scale: 1,
+            position: (0, 0),
             surface: None,
             layer: None,
             egl_window: None,
@@ -80,7 +97,19 @@ impl Output {
             logical: (0, 0),
             pixels: (0, 0),
             configured: false,
+            current: String::new(),
+            fade: None,
+            span_applied: None,
         }
+    }
+
+    fn rect(&self) -> Rect {
+        Rect::new(
+            self.position.0,
+            self.position.1,
+            self.logical.0,
+            self.logical.1,
+        )
     }
 }
 
@@ -117,6 +146,13 @@ pub struct App {
     pub exit: bool,
     pub wake_fd: i32,
     pub started: std::time::Instant,
+    /// Cursor in the shared playlist (monitors without their own list).
+    pub playlist_cursor: usize,
+    /// Cursors for `[playlist.outputs]` lists.
+    pub output_cursors: BTreeMap<String, usize>,
+    pub last_advance: Instant,
+    pub span_canvas: Option<Rect>,
+    rng: u64,
 }
 
 impl App {
@@ -153,6 +189,11 @@ impl App {
             exit: false,
             wake_fd,
             started: std::time::Instant::now(),
+            playlist_cursor: 0,
+            output_cursors: BTreeMap::new(),
+            last_advance: Instant::now(),
+            span_canvas: None,
+            rng: seed(),
         }
     }
 
@@ -406,12 +447,16 @@ impl App {
             return;
         }
         player.set_pause(self.paused);
+        player.set_brightness(0.0);
 
         let name = out.name.clone();
         out.egl_window = Some(window);
         out.egl_surface = Some(egl_surface);
         out.context = Some(context);
         out.player = Some(player);
+        out.current = path.clone();
+        out.fade = None;
+        out.span_applied = None;
         log::info!("{name}: playing {path} ({pw}x{ph})");
         if let Some(hwdec) = out
             .player
@@ -521,6 +566,267 @@ impl App {
             self.on_battery = battery;
         }
         self.refresh_pause();
+        self.tick_fades();
+        self.maybe_advance_playlist();
+        self.apply_span();
+    }
+
+    // ------------------------------------------------------------------ fades
+
+    fn tick_fades(&mut self) {
+        for out in &mut self.outputs {
+            let Some(fade) = out.fade.as_ref() else {
+                continue;
+            };
+            let (started, secs) = (fade.started, fade.secs.max(0.01));
+            let Some(player) = out.player.as_ref() else {
+                out.fade = None;
+                continue;
+            };
+            let progress = (started.elapsed().as_secs_f64() / secs).clamp(0.0, 1.0);
+            player.set_brightness(-100.0 * (1.0 - progress));
+            if progress >= 1.0 {
+                out.fade = None;
+            }
+        }
+    }
+
+    // ---------------------------------------------------------------- span
+
+    /// Bounding box of every connected monitor.
+    fn canvas(&self) -> Option<Rect> {
+        span::bounding_box(
+            self.outputs
+                .iter()
+                .filter(|out| out.alive && out.configured && out.logical.0 > 0)
+                .map(Output::rect),
+        )
+    }
+
+    /// Apply (or remove) the shared-canvas transform on every player.
+    ///
+    /// Safe to call on every tick: it only talks to mpv when the canvas or the
+    /// video aspect changes.
+    pub fn apply_span(&mut self) {
+        let monitors = self
+            .outputs
+            .iter()
+            .filter(|out| out.alive && out.configured)
+            .count();
+        let enabled = self.cfg.wallpaper.span && monitors > 1;
+
+        if !enabled {
+            self.span_canvas = None;
+            for out in &mut self.outputs {
+                if out.span_applied.take().is_some() {
+                    if let Some(player) = out.player.as_ref() {
+                        player.apply_mode(self.cfg.wallpaper.mode);
+                    }
+                }
+            }
+            return;
+        }
+
+        let Some(canvas) = self.canvas() else {
+            return;
+        };
+        let canvas_changed = self.span_canvas != Some(canvas);
+        self.span_canvas = Some(canvas);
+
+        for slot in 0..self.outputs.len() {
+            let out = &mut self.outputs[slot];
+            if !out.alive || !out.configured {
+                continue;
+            }
+            let Some(player) = out.player.as_ref() else {
+                continue;
+            };
+            if !canvas_changed && out.span_applied.is_some() {
+                continue;
+            }
+            let Some(aspect) = player.video_aspect() else {
+                // mpv has not probed the file yet; retry on the next tick.
+                continue;
+            };
+            let transform = span::transform(canvas, out.rect(), aspect);
+            if out
+                .span_applied
+                .map_or(false, |old| old.approx_eq(&transform))
+            {
+                out.span_applied = Some(transform);
+                continue;
+            }
+            player.set_span(transform);
+            out.span_applied = Some(transform);
+            log::debug!(
+                "{}: span zoom {:.3}, pan {:.3}/{:.3}",
+                out.name,
+                transform.zoom,
+                transform.pan_x,
+                transform.pan_y
+            );
+        }
+    }
+
+    // -------------------------------------------------------------- playlist
+
+    fn random_index(&mut self, len: usize) -> usize {
+        // xorshift64: plenty for picking wallpapers, no extra dependency.
+        self.rng ^= self.rng << 13;
+        self.rng ^= self.rng >> 7;
+        self.rng ^= self.rng << 17;
+        (self.rng % len.max(1) as u64) as usize
+    }
+
+    fn has_own_playlist(&self, output: &str) -> bool {
+        self.cfg
+            .playlist
+            .outputs
+            .get(output)
+            .map_or(false, |list| !list.is_empty())
+    }
+
+    /// Next index in the playlist for `output`, advancing its cursor.
+    fn next_index(&mut self, output: &str, len: usize, random: bool) -> usize {
+        if len == 0 {
+            return 0;
+        }
+        let own = self.has_own_playlist(output);
+        let index = if random {
+            self.random_index(len)
+        } else if own {
+            self.output_cursors.get(output).copied().unwrap_or(0) % len
+        } else {
+            self.playlist_cursor % len
+        };
+        let next = (index + 1) % len;
+        if own {
+            self.output_cursors.insert(output.to_string(), next);
+        } else {
+            self.playlist_cursor = next;
+        }
+        index
+    }
+
+    fn load_track(&mut self, slot: usize, path: String) {
+        let secs = self.cfg.playlist.fade_secs;
+        let paused = self.paused;
+        let out = &mut self.outputs[slot];
+        let Some(player) = out.player.as_mut() else {
+            return;
+        };
+        player.set_brightness(-100.0);
+        if let Err(error) = player.load(&path) {
+            log::warn!("{}: {error}", out.name);
+            player.set_brightness(0.0);
+            return;
+        }
+        player.set_pause(paused);
+        log::info!("{}: playlist → {path}", out.name);
+        out.current = path;
+        out.span_applied = None;
+        if secs > 0.01 {
+            out.fade = Some(Fade {
+                started: Instant::now(),
+                secs,
+            });
+        } else {
+            player.set_brightness(0.0);
+            out.fade = None;
+        }
+    }
+
+    fn pick_for(&mut self, slot: usize, random: bool) -> Option<String> {
+        let name = self.outputs[slot].name.clone();
+        let files = self.cfg.playlist_for(&name);
+        if files.is_empty() {
+            return None;
+        }
+        let mut index = self.next_index(&name, files.len(), random);
+        if files.len() > 1 && files[index] == self.outputs[slot].current {
+            index = (index + 1) % files.len();
+        }
+        Some(files[index].clone())
+    }
+
+    /// Switch one monitor, or all of them, to the next playlist entry.
+    ///
+    /// Returns the file applied to the last monitor, for the control client.
+    pub fn skip(&mut self, target: Option<String>, random: bool) -> Option<String> {
+        self.last_advance = Instant::now();
+        let slots: Vec<usize> = self
+            .outputs
+            .iter()
+            .enumerate()
+            .filter(|(_, out)| {
+                out.alive
+                    && out.player.is_some()
+                    && target.as_ref().map_or(true, |name| &out.name == name)
+            })
+            .map(|(slot, _)| slot)
+            .collect();
+        if slots.is_empty() {
+            return None;
+        }
+
+        if target.is_some() {
+            let slot = slots[0];
+            let path = self.pick_for(slot, random)?;
+            self.load_track(slot, path.clone());
+            return Some(path);
+        }
+
+        let mut last = None;
+
+        // Monitors with their own `[playlist.outputs]` list rotate alone.
+        for slot in slots.iter().copied() {
+            let name = self.outputs[slot].name.clone();
+            if !self.has_own_playlist(&name) {
+                continue;
+            }
+            if let Some(path) = self.pick_for(slot, random) {
+                self.load_track(slot, path.clone());
+                last = Some(path);
+            }
+        }
+
+        // Everybody else shares one list and one picture.
+        let shared: Vec<usize> = slots
+            .into_iter()
+            .filter(|slot| !self.has_own_playlist(&self.outputs[*slot].name))
+            .collect();
+        if let Some(&first) = shared.first() {
+            let name = self.outputs[first].name.clone();
+            let files = self.cfg.playlist_for(&name);
+            if !files.is_empty() {
+                let mut index = self.next_index(&name, files.len(), random);
+                if files.len() > 1 && files[index] == self.outputs[first].current {
+                    index = (index + 1) % files.len();
+                }
+                let path = files[index].clone();
+                for slot in shared {
+                    self.load_track(slot, path.clone());
+                }
+                last = Some(path);
+            }
+        }
+
+        last
+    }
+
+    fn maybe_advance_playlist(&mut self) {
+        if !self.cfg.playlist.enabled {
+            return;
+        }
+        let interval = Duration::from_secs(self.cfg.playlist.interval());
+        if self.last_advance.elapsed() < interval {
+            return;
+        }
+        self.last_advance = Instant::now();
+        let shuffle = self.cfg.playlist.shuffle;
+        if self.skip(None, shuffle).is_none() {
+            log::debug!("playlist is enabled but has no files");
+        }
     }
 
     // ----------------------------------------------------------- wallpaper ops
@@ -542,15 +848,29 @@ impl App {
 
     /// Forget every per-monitor override and fall back to the global wallpaper.
     pub fn clear_overrides(&mut self) {
-        if self.cfg.outputs.is_empty() {
-            return;
+        self.clear_override(None);
+    }
+
+    /// Forget one monitor's override, or all of them when `output` is `None`.
+    pub fn clear_override(&mut self, output: Option<&str>) {
+        let changed = match output {
+            Some(name) => self.cfg.outputs.remove(name).is_some(),
+            None if !self.cfg.outputs.is_empty() => {
+                self.cfg.outputs.clear();
+                true
+            }
+            None => false,
+        };
+        if changed {
+            self.restart_players();
         }
-        self.cfg.outputs.clear();
-        self.restart_players();
     }
 
     /// Point one monitor at a different file.
     pub fn set_output_wallpaper(&mut self, output: &str, path: String) {
+        // A per-monitor picture only makes sense without span; choosing one
+        // is an implicit request to leave the shared canvas.
+        self.cfg.wallpaper.span = false;
         self.cfg.outputs.insert(output.to_string(), path);
         let Some(slot) = self
             .outputs
@@ -560,21 +880,38 @@ impl App {
             return;
         };
         self.outputs[slot].player = None;
+        self.outputs[slot].span_applied = None;
         self.create_surface(slot);
         self.ensure_stream(slot);
         self.paint(slot);
+        self.apply_span();
+    }
+
+    /// Write the current configuration back to disk.
+    ///
+    /// Called after the daemon itself changes settings, so that `veilctl set`
+    /// and the D-Bus service survive a restart. Playlist rotations are
+    /// deliberately not saved: they are transient.
+    pub fn persist(&self) {
+        if let Err(error) = self.cfg.save_to(&self.cfg_path) {
+            log::warn!("cannot save {}: {error}", self.cfg_path.display());
+        }
     }
 
     pub fn restart_players(&mut self) {
         let slots: Vec<usize> = (0..self.outputs.len()).collect();
         for slot in &slots {
-            self.outputs[*slot].player = None;
+            let out = &mut self.outputs[*slot];
+            out.player = None;
+            out.span_applied = None;
+            out.fade = None;
         }
         for slot in slots {
             self.create_surface(slot);
             self.ensure_stream(slot);
         }
         self.refresh_pause();
+        self.apply_span();
     }
 
     pub fn reload(&mut self) {
@@ -582,6 +919,7 @@ impl App {
             Ok((cfg, _)) => {
                 let mode_changed = cfg.wallpaper.mode != self.cfg.wallpaper.mode;
                 let path_changed = cfg.wallpaper.path != self.cfg.wallpaper.path;
+                let span_changed = cfg.wallpaper.span != self.cfg.wallpaper.span;
                 let idle_changed = cfg.rules.idle_timeout_secs != self.cfg.rules.idle_timeout_secs;
                 let idle_enabled = cfg.rules.pause_on_idle;
                 let playback_changed = cfg.playback.hwdec != self.cfg.playback.hwdec
@@ -590,22 +928,36 @@ impl App {
                     || cfg.playback.vsync != self.cfg.playback.vsync
                     || cfg.playback.flip_y != self.cfg.playback.flip_y
                     || cfg.playback.mute != self.cfg.playback.mute;
+                let playlist_changed = cfg.playlist.enabled != self.cfg.playlist.enabled
+                    || cfg.playlist.interval_secs != self.cfg.playlist.interval_secs
+                    || cfg.playlist.shuffle != self.cfg.playlist.shuffle
+                    || cfg.playlist.items != self.cfg.playlist.items
+                    || cfg.playlist.outputs != self.cfg.playlist.outputs;
+                // Turning the rotation off returns every monitor to the file
+                // stored in the config, instead of freezing on the last pick.
+                let playlist_stopped = self.cfg.playlist.enabled && !cfg.playlist.enabled;
                 self.cfg = cfg;
                 if mode_changed {
                     for out in &mut self.outputs {
                         if let Some(player) = out.player.as_ref() {
                             player.apply_mode(self.cfg.wallpaper.mode);
+                            out.span_applied = None;
                         }
                     }
                 }
-                if path_changed || playback_changed {
+                if path_changed || playback_changed || span_changed || playlist_stopped {
                     self.restart_players();
+                }
+                if playlist_changed {
+                    // Do not skip immediately after the user edited the list.
+                    self.last_advance = Instant::now();
                 }
                 if idle_changed || idle_enabled != self.idle_notification.is_some() {
                     self.idle_timeout = self.cfg.rules.idle_timeout_secs;
                     self.recreate_idle();
                 }
                 self.refresh_pause();
+                self.apply_span();
                 log::info!("configuration reloaded");
             }
             Err(error) => log::error!("reload failed: {error}"),
@@ -623,9 +975,11 @@ impl App {
                     "name": o.name,
                     "logical": { "width": o.logical.0, "height": o.logical.1 },
                     "pixels": { "width": o.pixels.0, "height": o.pixels.1 },
+                    "position": { "x": o.position.0, "y": o.position.1 },
                     "scale": o.scale,
                     "configured": o.configured,
-                    "path": self.cfg.path_for(&o.name),
+                    "override": self.cfg.has_override(&o.name),
+                    "path": if o.current.is_empty() { self.cfg.path_for(&o.name) } else { o.current.clone() },
                     "decoder": player.and_then(|p| p.get_property("hwdec-current")),
                     "codec": player.and_then(|p| p.get_property("video-codec")),
                     "frames": o.frames.load(Ordering::Relaxed),
@@ -658,10 +1012,30 @@ impl App {
             "paused_by": reasons,
             "uptime_secs": self.started.elapsed().as_secs(),
             "mode": self.cfg.wallpaper.mode,
+            "span": self.cfg.wallpaper.span && self.outputs.iter().filter(|o| o.alive).count() > 1,
             "hwdec": self.cfg.playback.hwdec,
+            "playlist": {
+                "enabled": self.cfg.playlist.enabled,
+                "interval_secs": self.cfg.playlist.interval(),
+                "shuffle": self.cfg.playlist.shuffle,
+                "fade_secs": self.cfg.playlist.fade_secs,
+                "next_in_secs": if self.cfg.playlist.enabled {
+                    self.cfg.playlist.interval().saturating_sub(self.last_advance.elapsed().as_secs())
+                } else {
+                    0
+                },
+            },
             "outputs": outputs,
         })
     }
+}
+
+fn seed() -> u64 {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos() as u64)
+        .unwrap_or(0x9e37_79b9_7f4a_7c15);
+    (nanos ^ (std::process::id() as u64).rotate_left(32)) | 1
 }
 
 // ------------------------------------------------------------------ dispatch
@@ -724,6 +1098,10 @@ impl Dispatch<WlOutput, Slot> for App {
         };
         match event {
             wl_output::Event::Name { name } => out.name = name,
+            wl_output::Event::Geometry { x, y, .. } => {
+                out.position = (x, y);
+                log::debug!("{}: logical position {x},{y}", out.name);
+            }
             wl_output::Event::Scale { factor } => {
                 if factor > 0 {
                     out.scale = factor;

@@ -25,6 +25,18 @@ pub enum Request {
         #[serde(default)]
         clear_outputs: bool,
     },
+    /// Advance the playlist on one monitor (or on all of them).
+    Next {
+        output: Option<String>,
+    },
+    /// Switch to a random wallpaper from the playlist.
+    Random {
+        output: Option<String>,
+    },
+    /// Drop a per-monitor override; `None` clears all of them.
+    Clear {
+        output: Option<String>,
+    },
     Reload,
     Quit,
 }
@@ -149,4 +161,48 @@ fn spawn_client(stream: UnixStream, tx: Sender<Message>, wake_fd: i32) {
             .unwrap_or_else(|_| r#"{"ok":false,"error":"daemon did not answer"}"#.to_string());
         let _ = writeln!(writer, "{response}");
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn round_trip(request: Request) {
+        let text = serde_json::to_string(&request).unwrap();
+        let parsed: Request = serde_json::from_str(&text).unwrap();
+        assert_eq!(
+            std::mem::discriminant(&request),
+            std::mem::discriminant(&parsed)
+        );
+    }
+
+    #[test]
+    fn control_messages_serialise() {
+        round_trip(Request::Status);
+        round_trip(Request::Pause);
+        round_trip(Request::Resume);
+        round_trip(Request::Toggle);
+        round_trip(Request::Reload);
+        round_trip(Request::Quit);
+        round_trip(Request::Next {
+            output: Some("DP-1".into()),
+        });
+        round_trip(Request::Next { output: None });
+        round_trip(Request::Random { output: None });
+        round_trip(Request::Clear { output: None });
+        round_trip(Request::Set {
+            path: Some("/tmp/a.mp4".into()),
+            mode: Some(Mode::Fit),
+            output: Some("HDMI-A-1".into()),
+            clear_outputs: true,
+        });
+    }
+
+    #[test]
+    fn optional_fields_may_be_omitted() {
+        let parsed: Request = serde_json::from_str(r#"{"cmd":"next"}"#).unwrap();
+        assert!(matches!(parsed, Request::Next { output: None }));
+        let parsed: Request = serde_json::from_str(r#"{"cmd":"clear"}"#).unwrap();
+        assert!(matches!(parsed, Request::Clear { output: None }));
+    }
 }

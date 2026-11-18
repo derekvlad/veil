@@ -22,6 +22,7 @@ wayland-protocols = { version = "0.32", features = ["client", "unstable", "stagi
 wayland-protocols-wlr = { version = "0.3", features = ["client"] }
 gtk4 = { version = "0.11", features = ["v4_12"] }
 libadwaita = { version = "0.9", features = ["v1_6"] }
+zbus = "5"
 
 [profile.release]
 opt-level = 3

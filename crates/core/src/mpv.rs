@@ -279,6 +279,46 @@ impl Player {
         let _ = self.set_property("keepaspect", keepaspect);
         let _ = self.set_property("panscan", panscan);
         let _ = self.set_property("video-unscaled", unscaled);
+        self.clear_span();
+    }
+
+    /// Source aspect ratio, once mpv has probed the file.
+    pub fn video_aspect(&self) -> Option<f64> {
+        if let Some(aspect) = self.get_property("video-params/aspect") {
+            if let Ok(value) = aspect.parse::<f64>() {
+                if value > 0.0 && value.is_finite() {
+                    return Some(value);
+                }
+            }
+        }
+        let width = self.get_property("width")?.parse::<f64>().ok()?;
+        let height = self.get_property("height")?.parse::<f64>().ok()?;
+        (width > 0.0 && height > 0.0).then_some(width / height)
+    }
+
+    /// Zoom and pan so that this player shows its slice of a spanned picture.
+    ///
+    /// Span always uses the fill geometry of mpv; the per-monitor fill mode is
+    /// restored by [`apply_mode`](Self::apply_mode) when span is switched off.
+    pub fn set_span(&self, transform: crate::span::Transform) {
+        let _ = self.set_property("keepaspect", "yes");
+        let _ = self.set_property("panscan", "1.0");
+        let _ = self.set_property("video-unscaled", "no");
+        let _ = self.set_property("video-zoom", &format!("{:.6}", transform.zoom));
+        let _ = self.set_property("video-pan-x", &format!("{:.6}", transform.pan_x));
+        let _ = self.set_property("video-pan-y", &format!("{:.6}", transform.pan_y));
+    }
+
+    pub fn clear_span(&self) {
+        let _ = self.set_property("video-zoom", "0");
+        let _ = self.set_property("video-pan-x", "0");
+        let _ = self.set_property("video-pan-y", "0");
+    }
+
+    /// Brightness offset in mpv's -100..100 range (0 is normal).
+    pub fn set_brightness(&self, value: f64) {
+        let value = value.clamp(-100.0, 100.0);
+        let _ = self.set_property("brightness", &format!("{value:.3}"));
     }
 
     pub fn set_pause(&mut self, paused: bool) {

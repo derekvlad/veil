@@ -8,6 +8,7 @@ pub mod config;
 pub mod egl;
 pub mod ipc;
 pub mod mpv;
+pub mod span;
 pub mod wayland;
 
 use std::os::raw::c_void;

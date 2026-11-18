@@ -47,6 +47,9 @@ pub struct Wallpaper {
     pub mode: Mode,
     /// Colour behind the picture (letterboxing, or before the first frame).
     pub color: String,
+    /// Treat the monitors as one canvas and show a single picture across all
+    /// of them. Per-monitor overrides are ignored while this is on.
+    pub span: bool,
 }
 
 impl Default for Wallpaper {
@@ -55,6 +58,7 @@ impl Default for Wallpaper {
             path: String::new(),
             mode: Mode::Fill,
             color: "#000000".to_string(),
+            span: false,
         }
     }
 }
@@ -130,6 +134,64 @@ impl Default for Library {
     }
 }
 
+/// Automatic wallpaper rotation.
+///
+/// An empty `items` list means "every picture in the library". Entries under
+/// `outputs` are per-monitor playlists; monitors without an entry fall back to
+/// `items` (or the library scan).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Playlist {
+    pub enabled: bool,
+    /// Seconds between two changes. Values below 5 are clamped by the daemon.
+    pub interval_secs: u64,
+    pub shuffle: bool,
+    /// Fade the new picture in from black. 0 disables the effect.
+    pub fade_secs: f64,
+    pub items: Vec<String>,
+    pub outputs: BTreeMap<String, Vec<String>>,
+}
+
+impl Default for Playlist {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            interval_secs: 300,
+            shuffle: true,
+            fade_secs: 1.2,
+            items: Vec::new(),
+            outputs: BTreeMap::new(),
+        }
+    }
+}
+
+impl Playlist {
+    /// Seconds between changes, never less than five.
+    pub fn interval(&self) -> u64 {
+        self.interval_secs.max(5)
+    }
+
+    /// Files to rotate through on `output`, expanded and de-duplicated.
+    pub fn files_for(&self, output: &str, library: &Path) -> Vec<String> {
+        let explicit = self
+            .outputs
+            .get(output)
+            .filter(|list| !list.is_empty())
+            .or_else(|| (!self.items.is_empty()).then_some(&self.items));
+
+        let files: Vec<String> = match explicit {
+            Some(list) => list.iter().map(|path| expand(path)).collect(),
+            None => library_files(library),
+        };
+
+        let mut seen = std::collections::BTreeSet::new();
+        files
+            .into_iter()
+            .filter(|path| !path.is_empty() && seen.insert(path.clone()))
+            .collect()
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct Config {
@@ -137,6 +199,7 @@ pub struct Config {
     pub playback: Playback,
     pub rules: Rules,
     pub library: Library,
+    pub playlist: Playlist,
     /// Per-monitor overrides: key is the wl_output name (e.g. "DP-1").
     pub outputs: BTreeMap<String, String>,
 }
@@ -151,6 +214,8 @@ path = ""
 # fill | fit | stretch | center
 mode = "fill"
 color = "#000000"
+# One picture spread over every monitor instead of one per monitor.
+span = false
 
 [playback]
 # auto-safe picks VAAPI/VDPAU/NVDEC when the driver supports it.
@@ -174,9 +239,57 @@ pause_on_battery = false
 # Folder with the wallpapers shown in the GUI.
 path = "~/.local/share/veil/wallpapers"
 
+[playlist]
+# Rotate the wallpaper automatically. An empty `items` list means every
+# picture in the library; `[playlist.outputs]` holds per-monitor lists.
+enabled = false
+interval_secs = 300
+shuffle = true
+# Fade the new picture in from black. 0 disables it.
+fade_secs = 1.2
+items = []
+
+[playlist.outputs]
+# "DP-1" = ["/home/user/Videos/left.mp4", "/home/user/Videos/left2.mp4"]
+
 # [outputs]
 # "DP-1" = "/home/user/Videos/other.mp4"
 "##;
+
+const VIDEO_EXT: &[&str] = &["mp4", "webm", "mkv", "mov", "m4v", "avi", "ogv"];
+const IMAGE_EXT: &[&str] = &["png", "jpg", "jpeg", "webp", "avif", "gif", "bmp"];
+
+/// True for extensions the daemon can hand to mpv.
+pub fn is_media_file(path: &Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| {
+            let ext = ext.to_ascii_lowercase();
+            VIDEO_EXT.contains(&ext.as_str()) || IMAGE_EXT.contains(&ext.as_str())
+        })
+        .unwrap_or(false)
+}
+
+/// Sorted list of playable files directly inside `dir` (no recursion).
+pub fn library_files(dir: &Path) -> Vec<String> {
+    let Ok(read) = fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut paths: Vec<PathBuf> = read
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.is_file() && is_media_file(path))
+        .collect();
+    paths.sort_by_key(|path| {
+        path.file_name()
+            .map(|name| name.to_string_lossy().to_lowercase())
+            .unwrap_or_default()
+    });
+    paths
+        .into_iter()
+        .map(|path| path.to_string_lossy().into_owned())
+        .collect()
+}
 
 pub fn expand(path: &str) -> String {
     if let Some(rest) = path.strip_prefix("~/") {
@@ -216,7 +329,13 @@ impl Config {
     }
 
     /// Wallpaper for a given monitor, honouring per-output overrides.
+    ///
+    /// In span mode there is exactly one picture for the whole canvas, so
+    /// overrides are ignored until span is turned off again.
     pub fn path_for(&self, output: &str) -> String {
+        if self.wallpaper.span {
+            return expand(&self.wallpaper.path);
+        }
         self.outputs
             .get(output)
             .map(|p| expand(p))
@@ -225,6 +344,16 @@ impl Config {
 
     pub fn has_wallpaper(&self) -> bool {
         !self.wallpaper.path.is_empty() || !self.outputs.is_empty()
+    }
+
+    /// True when `output` has its own picture instead of the global one.
+    pub fn has_override(&self, output: &str) -> bool {
+        !self.wallpaper.span && self.outputs.contains_key(output)
+    }
+
+    /// Playlist files for one monitor (expanded, de-duplicated).
+    pub fn playlist_for(&self, output: &str) -> Vec<String> {
+        self.playlist.files_for(output, &self.library_path())
     }
 
     /// Persist the configuration, keeping a human-readable header.
@@ -273,5 +402,61 @@ mod tests {
         cfg.outputs.insert("DP-1".into(), "/b.mp4".into());
         assert_eq!(cfg.path_for("DP-1"), "/b.mp4");
         assert_eq!(cfg.path_for("HDMI-A-1"), "/a.mp4");
+        assert!(cfg.has_override("DP-1"));
+    }
+
+    #[test]
+    fn span_ignores_overrides() {
+        let mut cfg = Config::default();
+        cfg.wallpaper.path = "/a.mp4".into();
+        cfg.wallpaper.span = true;
+        cfg.outputs.insert("DP-1".into(), "/b.mp4".into());
+        assert_eq!(cfg.path_for("DP-1"), "/a.mp4");
+        assert!(!cfg.has_override("DP-1"));
+    }
+
+    #[test]
+    fn playlist_falls_back_to_library() {
+        let dir = std::env::temp_dir().join(format!("veil-test-{}", std::process::id()));
+        let _ = fs::create_dir_all(&dir);
+        fs::write(dir.join("b.mp4"), b"x").unwrap();
+        fs::write(dir.join("a.png"), b"x").unwrap();
+        fs::write(dir.join("notes.txt"), b"x").unwrap();
+
+        let playlist = Playlist::default();
+        let files = playlist.files_for("DP-1", &dir);
+        assert_eq!(files.len(), 2);
+        assert!(files[0].ends_with("a.png"));
+        assert!(files[1].ends_with("b.mp4"));
+
+        let mut playlist = playlist;
+        playlist.items = vec!["~/one.mp4".into(), "~/one.mp4".into()];
+        let files = playlist.files_for("DP-1", &dir);
+        assert_eq!(files.len(), 1);
+        assert!(files[0].ends_with("one.mp4"));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn config_round_trip() {
+        let mut cfg = Config::default();
+        cfg.wallpaper.path = "/tmp/a.mp4".into();
+        cfg.wallpaper.span = true;
+        cfg.playlist.enabled = true;
+        cfg.playlist.interval_secs = 42;
+        cfg.playlist.items = vec!["/tmp/b.mp4".into()];
+        cfg.playlist
+            .outputs
+            .insert("DP-1".into(), vec!["/tmp/c.mp4".into()]);
+
+        let dir = std::env::temp_dir().join(format!("veil-cfg-{}", std::process::id()));
+        let path = dir.join("config.toml");
+        cfg.save_to(&path).unwrap();
+        let (loaded, _) = Config::load_from(&path).unwrap();
+        assert!(loaded.wallpaper.span);
+        assert_eq!(loaded.playlist.interval_secs, 42);
+        assert_eq!(loaded.playlist.outputs["DP-1"], ["/tmp/c.mp4"]);
+        let _ = fs::remove_dir_all(&dir);
     }
 }
