@@ -160,7 +160,7 @@ hwdec = "auto-safe"    # auto-safe | vaapi | vaapi-copy | vulkan | no
 scale_filter = "lanczos"
 fps_limit = 0          # 0 = как в видео; 30 экономит upload/композитинг
 vsync = false          # true — ровнее на одном мониторе
-flip_y = false         # true, если картинка перевёрнута
+flip_y = true          # GL-путь пишет кадр снизу вверх; false — если перевёрнуто
 mute = true
 
 [rules]
@@ -212,7 +212,8 @@ systemctl --user enable --now veil.service
   Демон пишет в stderr, запустите `veild -v` из терминала.
 * **GUI не видит демон** — проверьте `$XDG_RUNTIME_DIR/veil.sock` и запустите
   `veild`; кнопка «Запустить демон» в окне делает то же самое.
-* **Картинка перевёрнута** — `flip_y = true` в конфиге (зависит от драйвера).
+* **Картинка перевёрнута** — поставьте `flip_y = false` (по умолчанию `true`,
+  потому что GL-кадр приходит снизу вверх) и сделайте `veilctl reload`.
 * **Дёргается на двух мониторах** — оставьте `vsync = false`.
 * **Высокий CPU** — посмотрите `decoder` в `status`. Если `no`, включите
   VAAPI явно и проверьте `vainfo`. Если `vaapi`, но всё равно много — уменьшите

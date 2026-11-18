@@ -72,7 +72,9 @@ pub struct Playback {
     /// Wait for vblank before presenting. Smoother on a single monitor,
     /// can add a frame of latency with several.
     pub vsync: bool,
-    /// Set to true if the image appears upside down.
+    /// Flip the picture vertically. The GL render path writes bottom-up
+    /// frames, so this is on by default; turn it off only if your driver
+    /// already delivers top-down pixels.
     pub flip_y: bool,
     /// Silence the player (video wallpapers are always silent for now).
     pub mute: bool,
@@ -85,7 +87,7 @@ impl Default for Playback {
             scale_filter: "lanczos".to_string(),
             fps_limit: 0,
             vsync: false,
-            flip_y: false,
+            flip_y: true,
             mute: true,
         }
     }
@@ -157,7 +159,8 @@ scale_filter = "lanczos"
 # 0 = native frame rate. Lower values cut upload/compositing cost.
 fps_limit = 0
 vsync = false
-flip_y = false
+# GL-рендер отдаёт кадр снизу вверх, поэтому по умолчанию переворачиваем.
+flip_y = true
 mute = true
 
 [rules]
