@@ -1,22 +1,16 @@
-[package]
-name = "veil"
+[workspace]
+resolver = "2"
+members = ["crates/core", "crates/daemon", "crates/ctl", "crates/gui"]
+
+[workspace.package]
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.80"
-description = "GPU-accelerated video wallpapers for Wayland compositors"
-license = "MIT OR Apache-2.0"
-repository = "https://example.invalid/veil"
+rust-version = "1.85"
+license = "MIT"
+authors = ["veil contributors"]
 
-[[bin]]
-name = "veild"
-path = "src/main.rs"
-
-[[bin]]
-name = "veilctl"
-path = "src/bin/veilctl.rs"
-
-[dependencies]
-khronos-egl = { version = "6", features = ["static"] }
+[workspace.dependencies]
+veil-core = { path = "crates/core" }
 libc = "0.2"
 log = { version = "0.4", features = ["std"] }
 serde = { version = "1", features = ["derive"] }
@@ -26,6 +20,8 @@ wayland-client = "0.31"
 wayland-egl = "0.32"
 wayland-protocols = { version = "0.32", features = ["client", "unstable", "staging"] }
 wayland-protocols-wlr = { version = "0.3", features = ["client"] }
+gtk4 = { version = "0.11", features = ["v4_12"] }
+libadwaita = { version = "0.9", features = ["v1_6"] }
 
 [profile.release]
 opt-level = 3

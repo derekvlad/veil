@@ -113,12 +113,28 @@ impl Default for Rules {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Library {
+    /// Folder the GUI scans for wallpapers. `~` is expanded.
+    pub path: String,
+}
+
+impl Default for Library {
+    fn default() -> Self {
+        Self {
+            path: "~/.local/share/veil/wallpapers".to_string(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct Config {
     pub wallpaper: Wallpaper,
     pub playback: Playback,
     pub rules: Rules,
+    pub library: Library,
     /// Per-monitor overrides: key is the wl_output name (e.g. "DP-1").
     pub outputs: BTreeMap<String, String>,
 }
@@ -151,6 +167,10 @@ pause_on_idle = true
 idle_timeout_secs = 120
 pause_on_battery = false
 
+[library]
+# Folder with the wallpapers shown in the GUI.
+path = "~/.local/share/veil/wallpapers"
+
 # [outputs]
 # "DP-1" = "/home/user/Videos/other.mp4"
 "##;
@@ -158,7 +178,10 @@ pause_on_battery = false
 pub fn expand(path: &str) -> String {
     if let Some(rest) = path.strip_prefix("~/") {
         if let Some(home) = std::env::var_os("HOME") {
-            return PathBuf::from(home).join(rest).to_string_lossy().into_owned();
+            return PathBuf::from(home)
+                .join(rest)
+                .to_string_lossy()
+                .into_owned();
         }
     }
     path.to_string()
@@ -200,6 +223,30 @@ impl Config {
     pub fn has_wallpaper(&self) -> bool {
         !self.wallpaper.path.is_empty() || !self.outputs.is_empty()
     }
+
+    /// Persist the configuration, keeping a human-readable header.
+    pub fn save_to(&self, path: &Path) -> Result<(), String> {
+        if let Some(dir) = path.parent() {
+            fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        }
+        let body = toml::to_string_pretty(self)
+            .map_err(|e| format!("cannot serialise the configuration: {e}"))?;
+        let text = format!(
+            "# veil — video wallpapers for Wayland\n\
+             # Written by veil-gui; the daemon re-reads this file on SIGHUP/reload.\n\n{body}"
+        );
+        fs::write(path, text).map_err(|e| format!("{}: {e}", path.display()))
+    }
+
+    /// Wallpaper library folder, expanded and with a sane fallback.
+    pub fn library_path(&self) -> PathBuf {
+        let raw = if self.library.path.is_empty() {
+            Library::default().path
+        } else {
+            self.library.path.clone()
+        };
+        PathBuf::from(expand(&raw))
+    }
 }
 
 #[cfg(test)]
@@ -212,6 +259,7 @@ mod tests {
         assert_eq!(cfg.wallpaper.mode, Mode::Fill);
         assert_eq!(cfg.playback.hwdec, "auto-safe");
         assert!(cfg.rules.pause_on_fullscreen);
+        assert!(cfg.library.path.ends_with("wallpapers"));
         assert!(!cfg.has_wallpaper());
     }
 

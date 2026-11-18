@@ -1,7 +1,7 @@
 //! `veilctl` — control client for `veild`.
 
-use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::UnixStream;
+use veil::config::Mode;
+use veil::ipc::{self, Request};
 
 fn usage() {
     println!(
@@ -28,24 +28,34 @@ fn main() {
     };
 
     let request = match command.as_str() {
-        "status" => serde_json::json!({ "cmd": "status" }),
-        "pause" => serde_json::json!({ "cmd": "pause" }),
-        "resume" => serde_json::json!({ "cmd": "resume" }),
-        "toggle" => serde_json::json!({ "cmd": "toggle" }),
-        "reload" => serde_json::json!({ "cmd": "reload" }),
-        "quit" => serde_json::json!({ "cmd": "quit" }),
+        "status" => Request::Status,
+        "pause" => Request::Pause,
+        "resume" => Request::Resume,
+        "toggle" => Request::Toggle,
+        "reload" => Request::Reload,
+        "quit" => Request::Quit,
         "set" => {
             let Some(path) = args.get(1) else {
                 eprintln!("veilctl: `set` needs a file path");
                 std::process::exit(2);
             };
-            let mut mode: Option<String> = None;
+            let mut mode: Option<Mode> = None;
             let mut output: Option<String> = None;
             let mut index = 2;
             while index < args.len() {
                 match args[index].as_str() {
                     "--mode" | "-m" => {
-                        mode = args.get(index + 1).cloned();
+                        let Some(value) = args.get(index + 1) else {
+                            eprintln!("veilctl: `--mode` needs a value");
+                            std::process::exit(2);
+                        };
+                        mode = match value.parse() {
+                            Ok(mode) => Some(mode),
+                            Err(error) => {
+                                eprintln!("veilctl: {error}");
+                                std::process::exit(2);
+                            }
+                        };
                         index += 2;
                     }
                     "--output" | "-o" => {
@@ -58,12 +68,12 @@ fn main() {
                     }
                 }
             }
-            serde_json::json!({
-                "cmd": "set",
-                "path": path,
-                "mode": mode,
-                "output": output,
-            })
+            Request::Set {
+                path: Some(path.clone()),
+                mode,
+                output,
+                clear_outputs: false,
+            }
         }
         "-h" | "--help" | "help" => {
             usage();
@@ -75,7 +85,7 @@ fn main() {
         }
     };
 
-    match send(&request.to_string()) {
+    match ipc::call(&request) {
         Ok(response) => pretty(&response),
         Err(error) => {
             eprintln!("veilctl: {error}");
@@ -84,27 +94,9 @@ fn main() {
     }
 }
 
-fn send(request: &str) -> Result<String, String> {
-    let path = veil::ipc::socket_path();
-    let mut stream = UnixStream::connect(&path)
-        .map_err(|error| format!("{}: {error} (is veild running?)", path.display()))?;
-    writeln!(stream, "{request}").map_err(|error| error.to_string())?;
-    let mut line = String::new();
-    BufReader::new(stream)
-        .read_line(&mut line)
-        .map_err(|error| error.to_string())?;
-    if line.trim().is_empty() {
-        return Err("daemon closed the connection".into());
-    }
-    Ok(line.trim().to_string())
-}
-
-fn pretty(response: &str) {
-    match serde_json::from_str::<serde_json::Value>(response) {
-        Ok(value) => match serde_json::to_string_pretty(&value) {
-            Ok(text) => println!("{text}"),
-            Err(_) => println!("{response}"),
-        },
+fn pretty(response: &serde_json::Value) {
+    match serde_json::to_string_pretty(response) {
+        Ok(text) => println!("{text}"),
         Err(_) => println!("{response}"),
     }
 }

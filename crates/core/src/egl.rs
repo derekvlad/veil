@@ -82,10 +82,7 @@ impl Egl {
             .map_err(describe)
     }
 
-    pub fn create_window_surface(
-        &self,
-        window: &WlEglSurface,
-    ) -> Result<egl::Surface, String> {
+    pub fn create_window_surface(&self, window: &WlEglSurface) -> Result<egl::Surface, String> {
         unsafe {
             instance().create_window_surface(
                 self.display,
@@ -97,11 +94,7 @@ impl Egl {
         .map_err(describe)
     }
 
-    pub fn make_current(
-        &self,
-        context: egl::Context,
-        surface: egl::Surface,
-    ) -> Result<(), String> {
+    pub fn make_current(&self, context: egl::Context, surface: egl::Surface) -> Result<(), String> {
         instance()
             .make_current(self.display, Some(surface), Some(surface), Some(context))
             .map_err(describe)

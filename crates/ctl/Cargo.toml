@@ -1,0 +1,16 @@
+[package]
+name = "veilctl"
+description = "Command-line control for the veil wallpaper daemon"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "veilctl"
+path = "src/main.rs"
+
+[dependencies]
+veil-core.workspace = true
+serde_json.workspace = true

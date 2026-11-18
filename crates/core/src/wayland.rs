@@ -190,7 +190,11 @@ impl App {
     }
 
     fn remove_global(&mut self, name: u32) {
-        if let Some(index) = self.outputs.iter().position(|o| o.global == name && o.alive) {
+        if let Some(index) = self
+            .outputs
+            .iter()
+            .position(|o| o.global == name && o.alive)
+        {
             log::info!("output {} disconnected", self.outputs[index].name);
             self.teardown(index);
             self.outputs[index].alive = false;
@@ -216,8 +220,7 @@ impl App {
             return;
         }
         let timeout = (self.idle_timeout * 1000).min(u32::MAX as u64) as u32;
-        let notification =
-            notifier.get_idle_notification(timeout, &seat, &self.qh, ());
+        let notification = notifier.get_idle_notification(timeout, &seat, &self.qh, ());
         self.idle_notification = Some(notification);
         log::debug!("idle notification armed after {}s", self.idle_timeout);
     }
@@ -490,7 +493,8 @@ impl App {
         if rules.pause_on_battery && self.on_battery {
             return true;
         }
-        let busy = |t: &Toplevel| t.alive && (t.fullscreen || (rules.pause_on_maximized && t.maximized));
+        let busy =
+            |t: &Toplevel| t.alive && (t.fullscreen || (rules.pause_on_maximized && t.maximized));
         if rules.pause_on_fullscreen && self.toplevels.iter().any(busy) {
             return true;
         }
@@ -536,6 +540,15 @@ impl App {
         }
     }
 
+    /// Forget every per-monitor override and fall back to the global wallpaper.
+    pub fn clear_overrides(&mut self) {
+        if self.cfg.outputs.is_empty() {
+            return;
+        }
+        self.cfg.outputs.clear();
+        self.restart_players();
+    }
+
     /// Point one monitor at a different file.
     pub fn set_output_wallpaper(&mut self, output: &str, path: String) {
         self.cfg.outputs.insert(output.to_string(), path);
@@ -552,7 +565,8 @@ impl App {
         self.paint(slot);
     }
 
-    pub fn restart_players(&mut self) {        let slots: Vec<usize> = (0..self.outputs.len()).collect();
+    pub fn restart_players(&mut self) {
+        let slots: Vec<usize> = (0..self.outputs.len()).collect();
         for slot in &slots {
             self.outputs[*slot].player = None;
         }
@@ -570,6 +584,12 @@ impl App {
                 let path_changed = cfg.wallpaper.path != self.cfg.wallpaper.path;
                 let idle_changed = cfg.rules.idle_timeout_secs != self.cfg.rules.idle_timeout_secs;
                 let idle_enabled = cfg.rules.pause_on_idle;
+                let playback_changed = cfg.playback.hwdec != self.cfg.playback.hwdec
+                    || cfg.playback.scale_filter != self.cfg.playback.scale_filter
+                    || cfg.playback.fps_limit != self.cfg.playback.fps_limit
+                    || cfg.playback.vsync != self.cfg.playback.vsync
+                    || cfg.playback.flip_y != self.cfg.playback.flip_y
+                    || cfg.playback.mute != self.cfg.playback.mute;
                 self.cfg = cfg;
                 if mode_changed {
                     for out in &mut self.outputs {
@@ -578,7 +598,7 @@ impl App {
                         }
                     }
                 }
-                if path_changed {
+                if path_changed || playback_changed {
                     self.restart_players();
                 }
                 if idle_changed || idle_enabled != self.idle_notification.is_some() {

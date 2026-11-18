@@ -285,7 +285,10 @@ impl Player {
         if self.paused == paused {
             return;
         }
-        if self.set_property("pause", if paused { "yes" } else { "no" }).is_ok() {
+        if self
+            .set_property("pause", if paused { "yes" } else { "no" })
+            .is_ok()
+        {
             self.paused = paused;
         }
     }
@@ -328,10 +331,7 @@ impl Player {
         let mut ctx: *mut mpv_render_context = ptr::null_mut();
         let rc = unsafe { mpv_render_context_create(&mut ctx, self.handle, params.as_mut_ptr()) };
         if rc < 0 {
-            return Err(format!(
-                "mpv_render_context_create: {}",
-                error_string(rc)
-            ));
+            return Err(format!("mpv_render_context_create: {}", error_string(rc)));
         }
         self.render = ctx;
 

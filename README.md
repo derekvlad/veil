@@ -2,9 +2,11 @@
 
 Видеообои для Wayland, которые не съедают процессор.
 
-`veil` — демон (`veild`) и клиент управления (`veilctl`). Демон рисует видео прямо
-в слой рабочего стола через EGL, декодируя его железом, и останавливает
-воспроизведение, когда обои всё равно не видно.
+`veil` — это демон `veild`, клиент `veilctl` и графический выбор обоев `veil-gui`.
+Демон рисует видео прямо в слой рабочего стола через EGL, декодируя его железом,
+и останавливает воспроизведение, когда обои всё равно не видно.
+
+![Выбор обоев в veil-gui](docs/screenshot.png)
 
 ## Зачем
 
@@ -42,11 +44,33 @@
 * **Правила паузы** — фуллскрин (`zwlr-foreign-toplevel-management`), простой
   (`ext-idle-notify`), работа от батареи, ручная пауза. В паузе декодер спит,
   а не крутит кадры «в никуда».
+* **Один демон на сессию** — `flock` на `$XDG_RUNTIME_DIR/veil.lock`: если
+  автозапуск сработал дважды (niri + systemd), второй процесс тихо выходит.
 * **Ноль лишнего**: без звука, OSD, привязок клавиш, скриншотов и блокировки
   ввода — клики по обоям уходят дальше в композитор.
 
 Перемотка, кодеки, цветокоррекция, HDR-тонмаппинг — всё это уже внутри mpv,
 поэтому собственный велосипед не нужен.
+
+## Выбор обоев (GUI)
+
+`veil-gui` — обычное GTK4/libadwaita-приложение, поэтому выглядит родным и в
+niri, и в KDE, и в GNOME:
+
+* библиотека обоев сеткой с постерами, разрешением и длительностью;
+* клик по обоям применяет их на выбранный экран («Все мониторы» или конкретный);
+* режимы `fill`, `fit`, `stretch`, `center` — применяются сразу;
+* «Добавить» копирует видео или картинку в библиотеку
+  (`~/.local/share/veil/wallpapers`), правый клик — «Удалить из библиотеки»
+  (файл уходит в корзину);
+* переключатели «без звука», пауза в фуллскрине/при простое/от батареи и
+  таймаут простоя;
+* случайные обои, поиск по библиотеке, статус демона и кнопка его запуска;
+* всё, что меняется в окне, сразу пишется в `~/.config/veil/config.toml`.
+
+Интерфейс на русском или английском — по `LANG`. Постеры для сетки делает
+`ffmpeg` и кэширует в `~/.cache/veil/thumbs`; без ffmpeg GUI работает, но
+показывает иконки вместо кадров.
 
 ## Совместимость
 
@@ -61,16 +85,20 @@
 Почему так: `wlr-layer-shell` — это протокол, по которому композитор отдаёт
 клиенту «фон». niri, Hyprland и sway его реализуют. KWin и Mutter фон внешним
 клиентам не отдают в принципе, поэтому там нужен плагин внутри оболочки.
+`veil-gui` при этом остаётся просто настройкой демона: на Plasma обоями
+управляет плагин, а не `veild`.
 
 ## Зависимости
 
-* Rust ≥ 1.80 и `pkg-config`
+* Rust ≥ 1.85 и `pkg-config`
 * `libmpv` (в Arch — пакет `mpv`)
 * Wayland, EGL, Mesa
+* GTK4 + libadwaita (для `veil-gui`)
+* `ffmpeg`/`ffprobe` — для постеров и метаданных (необязательно)
 
 ```sh
 # Arch
-sudo pacman -S rust mpv
+sudo pacman -S rust mpv gtk4 libadwaita ffmpeg
 ```
 
 ## Сборка и установка
@@ -79,18 +107,31 @@ sudo pacman -S rust mpv
 ./install.sh
 ```
 
-Ставит `veild` и `veilctl` в `~/.local/bin`, unit systemd и — если найден
-Plasma — плагин обоев в `~/.local/share/plasma/wallpapers/`.
+Скрипт собирает весь workspace, ставит `veild`, `veilctl` и `veil-gui` в
+`~/.local/bin`, desktop-файл и иконку в `~/.local/share`, unit systemd и — если
+найден Plasma — плагин обоев.
+
+Структура репозитория:
+
+```
+crates/core     библиотека veil: EGL, mpv, layer-shell, конфиг, IPC
+crates/daemon   veild — фоновый демон
+crates/ctl      veilctl — управление из терминала и скриптов
+crates/gui      veil-gui — GTK4-выбор обоев
+packaging       desktop-файл, иконка, systemd unit
+plugins         KDE-плагин и заметки про GNOME
+```
 
 ## Использование
 
 ```sh
-veilctl set ~/Videos/wallpaper.mp4     # поставить видео
-veilctl set ~/Pictures/photo.png       # или картинку
-veilctl set clip.mp4 --output DP-1     # только на один монитор
-veilctl status                         # мониторы, декодер, кадры, пауза
+veil-gui                                # выбрать обои мышкой
+veilctl set ~/Videos/wallpaper.mp4      # поставить видео
+veilctl set ~/Pictures/photo.png        # или картинку
+veilctl set clip.mp4 --output DP-1      # только на один монитор
+veilctl status                          # мониторы, декодер, кадры, пауза
 veilctl pause | resume | toggle
-veilctl reload                         # перечитать конфиг
+veilctl reload                          # перечитать конфиг
 veilctl quit
 ```
 
@@ -110,7 +151,7 @@ veilctl quit
 
 ```toml
 [wallpaper]
-path = "/home/user/Videos/wallpaper.mp4"
+path = "/home/user/.local/share/veil/wallpapers/wallpaper.mp4"
 mode = "fill"          # fill | fit | stretch | center
 color = "#000000"
 
@@ -129,20 +170,27 @@ pause_on_idle = true
 idle_timeout_secs = 120
 pause_on_battery = false
 
+[library]
+path = "~/.local/share/veil/wallpapers"
+
 [outputs]
 "HDMI-A-1" = "/home/user/Videos/second.mp4"
 ```
 
 Изменения применяются по `veilctl reload` или `kill -HUP $(pidof veild)`.
-Монитор можно указать и в `veilctl set ... --output`.
+Монитор можно указать и в `veilctl set ... --output`. GUI пишет этот файл сам,
+поэтому комментарии в нём не сохраняются — держите личные пометки вне конфига.
 
 ## Автозапуск
 
-**niri** (`~/.config/niri/config.kdl`):
+**niri** (`~/.config/niri/config.kdl`) — именно так настроено на этой машине:
 
 ```kdl
-spawn-at-startup "veild"
+spawn-at-startup "/home/derek/.local/bin/veild"
 ```
+
+Путь лучше писать абсолютным: на старте сессии `~/.local/bin` может ещё не быть
+в `PATH`.
 
 **systemd** (если в user-сессии проброшены `WAYLAND_DISPLAY` и `XDG_RUNTIME_DIR`,
 как это делает uwsm):
@@ -152,14 +200,18 @@ systemctl --user daemon-reload
 systemctl --user enable --now veil.service
 ```
 
+Можно включить оба способа: `flock` не даст запуститься второй копии.
+
 Не запускайте одновременно другой видео-демон: оба слоя будут декодировать
-видео, даже если виден только верхний. В Noctalia выберите статичные обои,
-иначе она продолжит держать свой `mpvpaper`.
+видео, даже если виден только верхний. В Noctalia обои выключены
+(`wallpaper.enabled = false`), иначе она продолжит запускать свой `mpvpaper`.
 
 ## Если что-то не так
 
 * **Чёрный экран** — `veilctl status`: есть ли `outputs`, `configured: true`.
   Демон пишет в stderr, запустите `veild -v` из терминала.
+* **GUI не видит демон** — проверьте `$XDG_RUNTIME_DIR/veil.sock` и запустите
+  `veild`; кнопка «Запустить демон» в окне делает то же самое.
 * **Картинка перевёрнута** — `flip_y = true` в конфиге (зависит от драйвера).
 * **Дёргается на двух мониторах** — оставьте `vsync = false`.
 * **Высокий CPU** — посмотрите `decoder` в `status`. Если `no`, включите
@@ -175,4 +227,4 @@ systemctl --user enable --now veil.service
 
 ## Лицензия
 
-MIT OR Apache-2.0.
+MIT.

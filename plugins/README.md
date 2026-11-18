@@ -1,5 +1,9 @@
 # Плагины для оболочек без layer-shell
 
+`veil-gui` — не плагин: это обычное GTK4-приложение, которое настраивает демон
+`veild` через его IPC. В niri, Hyprland и sway оно управляет обоями напрямую.
+В Plasma обоями управляет плагин ниже, а `veild` и `veil-gui` можно не запускать.
+
 ## KDE Plasma 6 — `kde/org.veil.video`
 
 Полноценный KPackage-плагин обоев: `MediaPlayer` + `VideoOutput` из Qt Multimedia

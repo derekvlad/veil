@@ -1,6 +1,6 @@
 //! Tiny JSON-lines control protocol over `$XDG_RUNTIME_DIR/veil.sock`.
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::io::AsRawFd;
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use crate::config::Mode;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(tag = "cmd", rename_all = "snake_case")]
 pub enum Request {
     Status,
@@ -21,6 +21,9 @@ pub enum Request {
         path: Option<String>,
         mode: Option<Mode>,
         output: Option<String>,
+        /// Drop every per-monitor override before applying the wallpaper.
+        #[serde(default)]
+        clear_outputs: bool,
     },
     Reload,
     Quit,
@@ -36,6 +39,34 @@ pub fn socket_path() -> PathBuf {
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("/tmp"));
     dir.join("veil.sock")
+}
+
+/// Send one request to a running daemon and decode its JSON answer.
+///
+/// This is the client half of the protocol, shared by `veilctl` and the GUI.
+pub fn call(request: &Request) -> Result<serde_json::Value, String> {
+    let path = socket_path();
+    let stream = UnixStream::connect(&path)
+        .map_err(|error| format!("{}: {error} (is veild running?)", path.display()))?;
+    stream
+        .set_read_timeout(Some(Duration::from_secs(12)))
+        .map_err(|error| format!("{}: {error}", path.display()))?;
+
+    let payload = serde_json::to_string(request).map_err(|error| error.to_string())?;
+    let mut writer = stream
+        .try_clone()
+        .map_err(|error| format!("{}: {error}", path.display()))?;
+    writeln!(writer, "{payload}").map_err(|error| error.to_string())?;
+    writer.flush().map_err(|error| error.to_string())?;
+
+    let mut line = String::new();
+    BufReader::new(stream)
+        .read_line(&mut line)
+        .map_err(|error| error.to_string())?;
+    if line.trim().is_empty() {
+        return Err("daemon closed the connection without answering".into());
+    }
+    serde_json::from_str(line.trim()).map_err(|error| format!("bad answer: {error}"))
 }
 
 pub struct Server {
@@ -54,11 +85,7 @@ impl Server {
             .set_nonblocking(true)
             .map_err(|e| format!("{}: {e}", path.display()))?;
         let (tx, rx) = mpsc::channel();
-        Ok((
-            Server { listener, path },
-            rx,
-            tx,
-        ))
+        Ok((Server { listener, path }, rx, tx))
     }
 
     pub fn fd(&self) -> i32 {
@@ -106,7 +133,13 @@ fn spawn_client(stream: UnixStream, tx: Sender<Message>, wake_fd: i32) {
         };
 
         let (reply_tx, reply_rx) = mpsc::channel();
-        if tx.send(Message { request, reply: reply_tx }).is_err() {
+        if tx
+            .send(Message {
+                request,
+                reply: reply_tx,
+            })
+            .is_err()
+        {
             return;
         }
         crate::wake(wake_fd);

@@ -1,5 +1,6 @@
 //! `veild` — the wallpaper daemon.
 
+use std::io::Write;
 use std::os::raw::{c_int, c_void};
 use std::os::unix::io::AsRawFd;
 use std::path::PathBuf;
@@ -79,6 +80,16 @@ fn main() {
         });
     }
 
+    // One daemon per session: niri's spawn-at-startup and the systemd unit may
+    // both fire, and two daemons would fight over the socket and the layer.
+    let _instance = match lock_instance() {
+        Ok(lock) => lock,
+        Err(error) => {
+            log::info!("{error}");
+            return;
+        }
+    };
+
     let loaded = match &config_path {
         Some(path) => Config::load_from(path),
         None => Config::load(),
@@ -112,24 +123,61 @@ fn help() {
     );
 }
 
+fn lock_instance() -> Result<std::fs::File, String> {
+    let dir = std::env::var_os("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/tmp"));
+    std::fs::create_dir_all(&dir).map_err(|error| format!("{}: {error}", dir.display()))?;
+    let path = dir.join("veil.lock");
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&path)
+        .map_err(|error| format!("{}: {error}", path.display()))?;
+
+    let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+    if rc != 0 {
+        let error = std::io::Error::last_os_error();
+        if matches!(error.raw_os_error(), Some(code) if code == libc::EWOULDBLOCK) {
+            return Err(format!(
+                "another veild is already running ({})",
+                path.display()
+            ));
+        }
+        return Err(format!("{}: {error}", path.display()));
+    }
+
+    let mut writer = &file;
+    let _ = writer.set_len(0);
+    let _ = writeln!(writer, "{}", std::process::id());
+    Ok(file)
+}
+
 fn run(config: Config, config_path: PathBuf) -> Result<(), String> {
-    let connection =
-        Connection::connect_to_env().map_err(|error| format!("cannot connect to Wayland: {error}"))?;
+    let connection = Connection::connect_to_env()
+        .map_err(|error| format!("cannot connect to Wayland: {error}"))?;
     let wl_display = connection.backend().display_ptr() as *mut c_void;
 
     let wake_fd = unsafe { libc::eventfd(0, libc::EFD_CLOEXEC | libc::EFD_NONBLOCK) };
     if wake_fd < 0 {
-        return Err(format!(
-            "eventfd: {}",
-            std::io::Error::last_os_error()
-        ));
+        return Err(format!("eventfd: {}", std::io::Error::last_os_error()));
     }
     WAKE_FD.store(wake_fd, Ordering::Relaxed);
 
     unsafe {
-        libc::signal(libc::SIGINT, handle_signal as extern "C" fn(c_int) as libc::sighandler_t);
-        libc::signal(libc::SIGTERM, handle_signal as extern "C" fn(c_int) as libc::sighandler_t);
-        libc::signal(libc::SIGHUP, handle_signal as extern "C" fn(c_int) as libc::sighandler_t);
+        libc::signal(
+            libc::SIGINT,
+            handle_signal as extern "C" fn(c_int) as libc::sighandler_t,
+        );
+        libc::signal(
+            libc::SIGTERM,
+            handle_signal as extern "C" fn(c_int) as libc::sighandler_t,
+        );
+        libc::signal(
+            libc::SIGHUP,
+            handle_signal as extern "C" fn(c_int) as libc::sighandler_t,
+        );
     }
 
     let egl = Egl::new(wl_display)?;
@@ -264,7 +312,11 @@ fn handle_request(app: &mut App, request: Request) -> String {
             path,
             mode,
             output,
+            clear_outputs,
         } => {
+            if clear_outputs {
+                app.clear_overrides();
+            }
             match (path, output) {
                 (Some(path), Some(output)) => app.set_output_wallpaper(&output, path),
                 (Some(path), None) => app.set_wallpaper(Some(path), mode),

@@ -1,0 +1,15 @@
+[Desktop Entry]
+Type=Application
+Name=veil
+GenericName=Video wallpaper
+GenericName[ru]=Видеообои
+Comment=Hardware-decoded video wallpapers for Wayland
+Comment[ru]=Видеообои с аппаратным декодированием для Wayland
+Exec=veil-gui
+Icon=org.veil.Veil
+Terminal=false
+Categories=Graphics;Settings;
+Keywords=wallpaper;background;video;mpv;wayland;
+Keywords[ru]=обои;фон;видео;wayland;
+StartupNotify=true
+StartupWMClass=org.veil.Veil

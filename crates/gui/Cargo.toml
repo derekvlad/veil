@@ -1,0 +1,18 @@
+[package]
+name = "veil-gui"
+description = "GTK4 wallpaper picker for veil"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "veil-gui"
+path = "src/main.rs"
+
+[dependencies]
+veil-core.workspace = true
+gtk4.workspace = true
+libadwaita.workspace = true
+serde_json.workspace = true
