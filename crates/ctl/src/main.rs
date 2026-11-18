@@ -510,9 +510,16 @@ fn scene_properties(
             &cfg.engine.assets,
         )))
     };
-    let mut command = std::process::Command::new(binary);
+    let mut command = std::process::Command::new(binary.clone());
     if let Some(assets) = assets {
         command.arg("--assets-dir").arg(assets);
+    }
+    // A web wallpaper starts Chromium inside the engine; without libcef ahead
+    // of libc it dies with "close symbol missing" (upstream issue #628).
+    if item.kind == "web" {
+        if let Some(libcef) = veil::engine::libcef(&binary, &cfg.engine.preload) {
+            command.env("LD_PRELOAD", libcef);
+        }
     }
     command.arg("--list-properties").arg(&item.dir);
     let output = command

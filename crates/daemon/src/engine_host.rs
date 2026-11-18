@@ -97,14 +97,28 @@ impl Host {
         }
         log::info!("engine: {} {}", binary.display(), args.join(" "));
 
-        match Command::new(&binary)
+        let mut command = Command::new(&binary);
+        command
             .args(&args)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             // The engine explains its failures on stderr; keep them in our log.
-            .stderr(Stdio::inherit())
-            .spawn()
-        {
+            .stderr(Stdio::inherit());
+        // Chromium's close() interposer needs libcef ahead of libc; without it
+        // every web wallpaper dies with "close symbol missing" (issue #628).
+        if targets.iter().any(|target| is_web(&target.id)) {
+            match engine::libcef(&binary, &cfg.engine.preload) {
+                Some(libcef) => {
+                    log::info!("preloading {} for a web wallpaper", libcef.display());
+                    command.env("LD_PRELOAD", libcef);
+                }
+                None => log::warn!(
+                    "web wallpaper without libcef: the engine will crash; set `[engine] preload`"
+                ),
+            }
+        }
+
+        match command.spawn() {
             Ok(child) => {
                 log::info!("engine started, pid {}", child.id());
                 self.child = Some(child);
@@ -144,6 +158,13 @@ impl Host {
             }
         }
     }
+}
+
+/// Whether the workshop item is an HTML wallpaper, which needs libcef.
+fn is_web(id: &str) -> bool {
+    engine::find(id)
+        .map(|item| item.kind == "web")
+        .unwrap_or(false)
 }
 
 impl Drop for Host {

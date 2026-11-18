@@ -206,6 +206,9 @@ pub struct EngineSettings {
     /// Keys come from `veilctl engine props <id>`; unknown ones are ignored.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub properties: BTreeMap<String, String>,
+    /// `libcef.so` to preload for web wallpapers; empty finds it, `none` skips.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub preload: String,
 }
 
 impl Default for EngineSettings {
@@ -215,6 +218,7 @@ impl Default for EngineSettings {
             assets: String::new(),
             scaling: "fill".into(),
             properties: BTreeMap::new(),
+            preload: String::new(),
         }
     }
 }
@@ -308,6 +312,9 @@ scaling = "fill"
 # [engine.properties]
 # clock = "0"
 # audiobars = "0"
+# Web wallpapers need libcef.so loaded before libc (upstream bug #628); empty
+# finds it next to the engine, `none` turns the preload off.
+# preload = ""
 
 # Desktop widgets: `veil-widgets` draws them over the wallpaper, under windows.
 # Positions are percent of the monitor, 0…100; `output` limits a widget to one

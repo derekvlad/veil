@@ -297,6 +297,7 @@ fn list_properties(
     item: &engine::Item,
     binary: &str,
     assets: &str,
+    preload: &str,
 ) -> Result<Vec<Property>, String> {
     let Some(binary) = engine::binary(binary) else {
         return Err(t(
@@ -311,9 +312,15 @@ fn list_properties(
         Some(PathBuf::from(veil::config::expand(assets)))
     };
 
-    let mut command = Command::new(binary);
+    let mut command = Command::new(binary.clone());
     if let Some(assets) = assets {
         command.arg("--assets-dir").arg(assets);
+    }
+    // Web wallpapers bring up Chromium, which needs libcef before libc.
+    if item.kind == "web" {
+        if let Some(libcef) = engine::libcef(&binary, preload) {
+            command.env("LD_PRELOAD", libcef);
+        }
     }
     // The scene folder is unambiguous even when the id would collide.
     command.arg("--list-properties").arg(&item.dir);
@@ -415,9 +422,13 @@ pub fn open(state: &Rc<AppState>, item: &engine::Item) {
     content.append(&footer);
     window.set_child(Some(&content));
 
-    let (binary, assets) = {
+    let (binary, assets, preload) = {
         let cfg = state.cfg.borrow();
-        (cfg.engine.binary.clone(), cfg.engine.assets.clone())
+        (
+            cfg.engine.binary.clone(),
+            cfg.engine.assets.clone(),
+            cfg.engine.preload.clone(),
+        )
     };
 
     let ui = Rc::new(Ui {
@@ -442,7 +453,7 @@ pub fn open(state: &Rc<AppState>, item: &engine::Item) {
     {
         let item = item.clone();
         std::thread::spawn(move || {
-            let result = list_properties(&item, &binary, &assets);
+            let result = list_properties(&item, &binary, &assets, &preload);
             let _ = sender.send(Msg::Properties(result));
         });
     }

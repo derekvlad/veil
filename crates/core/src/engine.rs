@@ -74,11 +74,14 @@ pub fn parse_project(dir: &Path, text: &str) -> Result<Item, String> {
     let project: Project =
         serde_json::from_str(text).map_err(|error| format!("{}: {error}", dir.display()))?;
     let kind = project.kind.to_ascii_lowercase();
-    // Web and application wallpapers keep their code inside a `.pkg` (or rely on
-    // a dependency's), so there is often no `file` at all — and no engine that
-    // could run them either. Only the kinds we hand over need a main asset.
-    let supported = matches!(kind.as_str(), "video" | "scene");
-    if supported && project.file.is_empty() {
+    // Application and unknown wallpapers keep their code inside a `.pkg` (or
+    // rely on a dependency's), so there is often no `file` at all — and no
+    // engine that could run them either. Scenes, videos and web pages name a
+    // main file the engine knows how to open; a web wallpaper that only points
+    // at a dependency has none and stays listed as unusable.
+    let has_file = !project.file.is_empty();
+    let supported = has_file && matches!(kind.as_str(), "video" | "scene" | "web");
+    if matches!(kind.as_str(), "video" | "scene") && !has_file {
         return Err(format!("{}: project has no `file`", dir.display()));
     }
     let id = project
@@ -233,6 +236,42 @@ pub fn scan_workshop() -> Vec<Item> {
 /// Find one workshop item by id.
 pub fn find(id: &str) -> Option<Item> {
     scan_workshop().into_iter().find(|item| item.id == id)
+}
+
+/// The CEF library to preload, when the engine needs it.
+///
+/// Chromium resolves libc's `close()` from its interposer with
+/// `dlsym(RTLD_NEXT, "close")`, which only works if libcef precedes libc in the
+/// load order. Builds that link libcef only through the engine's own shared
+/// library get libcef after libc and crash on every web wallpaper with
+/// "close symbol missing" (upstream issue #628). Preloading libcef restores the
+/// order the interposer expects.
+///
+/// `configured` is `[engine] preload`: empty means "look for it", `none` or
+/// `off` disables the workaround, and any other value is a path.
+pub fn libcef(binary: &Path, configured: &str) -> Option<PathBuf> {
+    let configured = configured.trim();
+    if matches!(configured, "none" | "off") {
+        return None;
+    }
+    if !configured.is_empty() {
+        return Some(PathBuf::from(veil_expand(configured)));
+    }
+
+    let mut candidates = Vec::new();
+    if let Some(path) = std::env::var_os("VEIL_LIBCEF") {
+        candidates.push(PathBuf::from(path));
+    }
+    if let Some(dir) = binary.parent() {
+        candidates.push(dir.join("libcef.so"));
+    }
+    // The packaged launcher runs from /opt/<name>, where the library lives.
+    candidates.push(PathBuf::from("/opt/linux-wallpaperengine/libcef.so"));
+    candidates.into_iter().find(|path| path.is_file())
+}
+
+fn veil_expand(path: &str) -> String {
+    crate::config::expand(path)
 }
 
 /// Which `linux-wallpaperengine` binary to run.
@@ -653,13 +692,21 @@ mod tests {
     #[test]
     fn marks_kinds_the_engine_cannot_render() {
         let dir = temp_dir("kinds");
+        // The engine renders web pages through its own copy of Chromium.
         let web = parse_project(
             &dir,
             r#"{"title":"w","type":"web","file":"index.html","workshopid":7}"#,
         )
         .unwrap();
         assert_eq!(web.kind, "web");
-        assert!(!web.supported);
+        assert!(web.supported);
+        let application = parse_project(
+            &dir,
+            r#"{"title":"a","type":"application","file":"a.pkg","workshopid":9}"#,
+        )
+        .unwrap();
+        assert_eq!(application.kind, "application");
+        assert!(!application.supported);
         let video = parse_project(
             &dir,
             r#"{"title":"v","type":"VIDEO","file":"a.mp4","workshopid":8}"#,
@@ -678,7 +725,9 @@ mod tests {
     }
 
     #[test]
-    fn keeps_unsupported_kinds_without_a_file() {
+    fn keeps_kinds_without_a_file() {
+        // A web wallpaper that only points at a dependency has nothing the
+        // engine could load, so it stays listed but unusable.
         let dir = temp_dir("web-no-file");
         let folder = dir.join("3121652946");
         fs::create_dir_all(&folder).unwrap();
@@ -875,6 +924,25 @@ schemecolor - color
         assert_eq!(bool_value(true), "1");
         assert_eq!(number_value(0.5, 1.0), "0");
         assert_eq!(number_value(0.5294, 0.001), "0.529");
+    }
+
+    #[test]
+    fn finds_libcef_next_to_the_engine() {
+        let dir = temp_dir("libcef");
+        let binary = dir.join("linux-wallpaperengine");
+        fs::write(&binary, b"").unwrap();
+        let cef = dir.join("libcef.so");
+        fs::write(&cef, b"").unwrap();
+        assert_eq!(libcef(&binary, ""), Some(cef));
+        // An explicit "off" means the build does not need the workaround.
+        assert_eq!(libcef(&binary, "none"), None);
+        assert_eq!(libcef(&binary, "off"), None);
+        let elsewhere = temp_dir("libcef-explicit");
+        let path = elsewhere.join("my-libcef.so");
+        fs::write(&path, b"").unwrap();
+        assert_eq!(libcef(&binary, &path.display().to_string()), Some(path));
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&elsewhere);
     }
 
     #[test]
