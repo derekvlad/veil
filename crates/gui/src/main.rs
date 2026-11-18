@@ -4,6 +4,7 @@
 //! any desktop that can run the daemon, from niri to KDE and GNOME.
 
 mod library;
+mod widgets;
 mod workshop;
 
 use std::cell::{Cell, RefCell};
@@ -28,6 +29,8 @@ const MODES: [Mode; 4] = [Mode::Fill, Mode::Fit, Mode::Stretch, Mode::Center];
 
 /// Set by `--workshop`, read when the main window is built.
 static OPEN_WORKSHOP: OnceLock<bool> = OnceLock::new();
+/// Set by `--widgets`, read when the main window is built.
+static OPEN_WIDGETS: OnceLock<bool> = OnceLock::new();
 
 fn main() -> glib::ExitCode {
     let app = adw::Application::builder().application_id(APP_ID).build();
@@ -39,9 +42,20 @@ fn main() -> glib::ExitCode {
         "Open the wallpaper workshop",
         None,
     );
+    app.add_main_option(
+        "widgets",
+        glib::Char::from(b'W'),
+        glib::OptionFlags::NONE,
+        glib::OptionArg::None,
+        "Open the widget editor",
+        None,
+    );
     app.connect_handle_local_options(|_, options| {
         if options.contains("workshop") {
             let _ = OPEN_WORKSHOP.set(true);
+        }
+        if options.contains("widgets") {
+            let _ = OPEN_WIDGETS.set(true);
         }
         std::ops::ControlFlow::Continue(())
     });
@@ -52,7 +66,7 @@ fn main() -> glib::ExitCode {
 
 // ------------------------------------------------------------------- language
 
-fn russian() -> bool {
+pub(crate) fn russian() -> bool {
     static CACHE: OnceLock<bool> = OnceLock::new();
     *CACHE.get_or_init(|| {
         std::env::var("LANG")
@@ -157,6 +171,17 @@ fn load_css() {
         }
         .empty-icon {
             opacity: 0.5;
+        }
+        .canvas-preview {
+            border-radius: 12px;
+            background: linear-gradient(160deg, #2a2a38, #12121a 60%, #0a0a10);
+        }
+        .canvas-widget {
+            transition: box-shadow 120ms ease-in-out;
+        }
+        .selected-widget {
+            box-shadow: 0 0 0 2px alpha(@accent_color, 0.9);
+            border-radius: 10px;
         }
         "#,
     );
@@ -298,6 +323,11 @@ fn build_window(app: &adw::Application) {
     workshop_button.set_tooltip_text(Some(t("Wallpaper workshop", "Мастерская обоев")));
     header.pack_end(&workshop_button);
 
+    let widgets_button = gtk::Button::from_icon_name("view-grid-symbolic");
+    widgets_button.add_css_class("flat");
+    widgets_button.set_tooltip_text(Some(t("Widgets on the wallpaper", "Виджеты на обоях")));
+    header.pack_end(&widgets_button);
+
     let pause_button = gtk::Button::from_icon_name("media-playback-pause-symbolic");
     pause_button.add_css_class("flat");
     pause_button.set_tooltip_text(Some(t("Pause / resume", "Пауза / продолжить")));
@@ -328,6 +358,7 @@ fn build_window(app: &adw::Application) {
         Some(t("Wallpaper workshop…", "Мастерская обоев…")),
         Some("win.workshop"),
     );
+    menu.append(Some(t("Widgets…", "Виджеты…")), Some("win.widgets"));
     menu.append(Some(t("About veil", "О программе")), Some("win.about"));
     menu.append(Some(t("Quit", "Выход")), Some("app.quit"));
 
@@ -711,6 +742,13 @@ fn build_window(app: &adw::Application) {
     });
     window.add_action(&workshop_action);
 
+    let widgets_action = gio::SimpleAction::new("widgets", None);
+    widgets_action.connect_activate({
+        let state = state.clone();
+        move |_, _| widgets::open(&state)
+    });
+    window.add_action(&widgets_action);
+
     let about = gio::SimpleAction::new("about", None);
     about.connect_activate({
         let state = state.clone();
@@ -727,6 +765,7 @@ fn build_window(app: &adw::Application) {
 
     app.set_accels_for_action("win.refresh", &["F5"]);
     app.set_accels_for_action("win.workshop", &["<Control>w"]);
+    app.set_accels_for_action("win.widgets", &["<Control><Shift>w"]);
     app.set_accels_for_action("app.quit", &["<Control>q"]);
 
     // --------------------------------------------------------------- behaviour
@@ -761,6 +800,11 @@ fn build_window(app: &adw::Application) {
             Err(error) => state.toast(&error),
         }
     });
+    widgets_button.connect_clicked({
+        let state = state.clone();
+        move |_| widgets::open(&state)
+    });
+
     workshop_button.connect_clicked({
         let state = state.clone();
         move |_| workshop::open(&state)
@@ -768,6 +812,10 @@ fn build_window(app: &adw::Application) {
     if OPEN_WORKSHOP.get().copied().unwrap_or(false) {
         let state = state.clone();
         glib::idle_add_local_once(move || workshop::open(&state));
+    }
+    if OPEN_WIDGETS.get().copied().unwrap_or(false) {
+        let state = state.clone();
+        glib::idle_add_local_once(move || widgets::open(&state));
     }
     state.pause_button.connect_clicked({
         let state = state.clone();

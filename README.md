@@ -223,6 +223,7 @@ veilctl engine list [query]            # что нашлось в мастерс
 veilctl engine apply 1845706469        # на все мониторы
 veilctl engine apply 1845706469 --output DP-1
 veilctl engine props 1845706469        # свойства сцены, если она их отдаёт
+veilctl widgets                        # виджеты: что настроено и запущено ли
 ```
 
 В GUI обои из Steam стоят в общей сетке рядом с библиотекой, с подписью
@@ -246,6 +247,62 @@ scaling = "fill"  # fill | fit | stretch — как движок вписыва�
 Правила паузы veil (`pause_on_battery`, простой, полный экран) на экраны с WE
 не действуют: у движка свой цикл, veil его не останавливает.
 
+## Виджеты
+
+Часы, нагрузка, батарея, «сейчас играет» и просто текст — поверх обоев и под
+окнами. Рисует их отдельный процесс `veil-widgets` (GTK4 + layer-shell): по
+одному прозрачному окну на монитор, с пустой областью ввода, поэтому клики
+уходят на обои и в окна, а виджеты никогда не забирают фокус.
+
+Включаются в `~/.config/veil/config.toml`; проще всего — в GUI, кнопка
+«Виджеты» в шапке (`Ctrl+Shift+W`):
+
+```toml
+[[widgets]]
+kind = "clock"          # clock | stats | battery | mpris | text
+output = "all"          # all | DP-1 | HDMI-A-1
+x = 50                  # позиция в процентах от монитора, 0…100
+y = 6
+halign = "center"       # start | center | end — какая точка виджета в (x, y)
+valign = "start"
+size = 52               # кегль, pt
+color = "#ffffff"
+opacity = 0.9
+shade = true            # плашка под текстом для читаемости на светлых кадрах
+font = ""               # пусто — шрифт интерфейса
+format = "%H:%M\n%d %B"
+enabled = true
+```
+
+`format` зависит от типа:
+
+| kind | что подставляется |
+| --- | --- |
+| `clock` | `%H` `%M` `%S` `%d` `%m` `%Y` `%A` `%B` `%%`, `\n` — перенос строки |
+| `stats` | `{cpu}` процент, `{used}` и `{total}` ГБ, `{ram}` процент занятой памяти |
+| `battery` | `{percent}`, `{state}` — «заряжается» / «от батареи» / «заряжено» |
+| `mpris` | текст не нужен: берётся «исполнитель — название» из `playerctl` |
+| `text` | строка как есть |
+
+Позиции в процентах, а не в пикселях: один конфиг одинаково выглядит на 1080p
+и на 4K. В редакторе виджеты перетаскиваются мышью по превью обоев; те же
+проценты пишутся в конфиг, поэтому редактор и рендерер не расходятся.
+
+```sh
+veil-gui --widgets         # открыть редактор сразу, минуя главное окно
+veilctl widgets            # что настроено и запущен ли рендерер
+veil-widgets --check       # проверить конфиг, ничего не рисуя
+veil-widgets               # запустить вручную (обычно это делает автозапуск)
+```
+
+Кнопки в редакторе: «+» — добавить виджет, переключатель в списке — включить
+или выключить, поля справа — монитор, позиция, кегль, цвет, прозрачность,
+плашка, шрифт и формат. Изменения сохраняются сразу, рендерер подхватывает
+файл сам.
+
+Чего нет: батареи на десктопе без `/sys/class/power_supply/BAT*` не будет
+вовсе (виджет просто не показывается), а MPRIS-виджет требует `playerctl`.
+
 ## Совместимость
 
 | Окружение | Статус | Как |
@@ -268,11 +325,13 @@ scaling = "fill"  # fill | fit | stretch — как движок вписыва�
 * `libmpv` (в Arch — пакет `mpv`)
 * Wayland, EGL, Mesa
 * GTK4 + libadwaita (для `veil-gui`)
+* `gtk4-layer-shell` (для `veil-widgets`)
 * `ffmpeg`/`ffprobe` — для постеров и метаданных (необязательно)
+* `playerctl` — для виджета «сейчас играет» (необязательно)
 
 ```sh
 # Arch
-sudo pacman -S rust mpv gtk4 libadwaita ffmpeg
+sudo pacman -S rust mpv gtk4 libadwaita gtk4-layer-shell ffmpeg playerctl
 ```
 
 ## Сборка и установка
@@ -281,9 +340,9 @@ sudo pacman -S rust mpv gtk4 libadwaita ffmpeg
 ./install.sh
 ```
 
-Скрипт собирает весь workspace, ставит `veild`, `veilctl` и `veil-gui` в
-`~/.local/bin`, desktop-файл и иконку в `~/.local/share`, unit systemd и — если
-найден Plasma — плагин обоев.
+Скрипт собирает весь workspace, ставит `veild`, `veilctl`, `veil-gui` и
+`veil-widgets` в `~/.local/bin`, desktop-файл и иконку в `~/.local/share`,
+unit systemd и — если найден Plasma — плагин обоев.
 
 Структура репозитория:
 
@@ -291,7 +350,8 @@ sudo pacman -S rust mpv gtk4 libadwaita ffmpeg
 crates/core     библиотека veil: EGL, mpv, layer-shell, конфиг, IPC, span, D-Bus-клиент
 crates/daemon   veild — фоновый демон и сервис org.veil.Veild
 crates/ctl      veilctl — управление из терминала и скриптов
-crates/gui      veil-gui — GTK4-выбор обоев
+crates/gui      veil-gui — GTK4-выбор обоев и редактор виджетов
+crates/widgets  veil-widgets — часы, нагрузка, батарея и MPRIS на layer-shell
 crates/daemon (engine_host.rs) — процесс linux-wallpaperengine для сцен WE
 packaging       desktop-файл, иконка, systemd unit, PKGBUILD
 plugins         KDE-плагин и заметки про GNOME
@@ -307,7 +367,8 @@ cargo test --workspace
 
 Тесты покрывают разбор и round-trip конфига, serde-формат IPC, выбор файлов
 плейлиста, разбор `project.json` и библиотек Steam, математику span (bounding box, zoom/pan для двух экранов,
-панорамный исходник, вырожденные значения). Для AUR есть
+панорамный исходник, вырожденные значения), а также виджеты: якоря, форматы
+времени, шаблоны нагрузки и батареи, нормализацию цвета. Для AUR есть
 `packaging/PKGBUILD` (пакет `veil-git`).
 
 ## Использование
@@ -392,6 +453,14 @@ binary = ""       # пусто — искать в PATH
 assets = ""       # пусто — искать в библиотеках Steam
 scaling = "fill"
 
+# Виджеты: рисует veil-widgets поверх обоев, под окнами.
+[[widgets]]
+kind = "clock"
+x = 50            # проценты от монитора
+y = 6
+size = 52
+format = "%H:%M\n%d %B"
+
 [outputs]
 "HDMI-A-1" = "/home/user/Videos/second.mp4"
 ```
@@ -409,10 +478,12 @@ scaling = "fill"
 
 ```kdl
 spawn-at-startup "/home/derek/.local/bin/veild"
+spawn-at-startup "/home/derek/.local/bin/veil-widgets"
 ```
 
-Путь лучше писать абсолютным: на старте сессии `~/.local/bin` может ещё не быть
-в `PATH`.
+Вторая строка нужна только если в конфиге есть `[[widgets]]`; без виджетов
+процесс сразу выходит. Путь лучше писать абсолютным: на старте сессии
+`~/.local/bin` может ещё не быть в `PATH`.
 
 **systemd** (если в user-сессии проброшены `WAYLAND_DISPLAY` и `XDG_RUNTIME_DIR`,
 как это делает uwsm):

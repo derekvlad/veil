@@ -12,6 +12,7 @@ pub mod ipc;
 pub mod mpv;
 pub mod span;
 pub mod wayland;
+pub mod widgets;
 
 use std::os::raw::c_void;
 

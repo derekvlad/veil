@@ -232,6 +232,9 @@ pub struct Config {
     pub playlist: Playlist,
     pub catalog: CatalogSettings,
     pub engine: EngineSettings,
+    /// Desktop widgets from `[[widgets]]`; empty means "no widget process".
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub widgets: Vec<crate::widgets::Widget>,
     /// Per-monitor overrides: key is the wl_output name (e.g. "DP-1").
     pub outputs: BTreeMap<String, String>,
 }
@@ -295,6 +298,17 @@ url = ""
 binary = ""
 assets = ""
 scaling = "fill"
+
+# Desktop widgets: `veil-widgets` draws them over the wallpaper, under windows.
+# Positions are percent of the monitor, 0…100; `output` limits a widget to one
+# screen. `format` for clocks is strftime-like, a literal \n breaks the line.
+# [[widgets]]
+# kind = "clock"
+# output = "all"
+# x = 50
+# y = 6
+# size = 52
+# format = "%H:%M\n%d %B"
 
 # [outputs]
 # "DP-1" = "/home/user/Videos/other.mp4"

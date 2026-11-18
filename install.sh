@@ -15,6 +15,7 @@ echo "==> installing binaries to $prefix/bin"
 install -Dm755 target/release/veild "$prefix/bin/veild"
 install -Dm755 target/release/veilctl "$prefix/bin/veilctl"
 install -Dm755 target/release/veil-gui "$prefix/bin/veil-gui"
+install -Dm755 target/release/veil-widgets "$prefix/bin/veil-widgets"
 
 echo "==> installing desktop entry and icon"
 install -Dm644 packaging/org.veil.Veil.desktop \

@@ -24,6 +24,7 @@ fn usage() {
          \x20 veilctl engine list|status             Wallpaper Engine content\n\
          \x20 veilctl engine apply <id> [--output DP-1]\n\
          \x20 veilctl engine props <id>              scene settings\n\
+         \x20 veilctl widgets [list]                desktop widgets from [[widgets]]\n\
          \x20                                    list the workshop catalogue\n\
          \x20 veilctl reload                     re-read the config file\n\
          \x20 veilctl quit                       stop the daemon\n\
@@ -488,6 +489,10 @@ fn main() {
             engine_command(&args);
             return;
         }
+        "widgets" => {
+            widgets_command();
+            return;
+        }
         "set" => {
             let Some(path) = args.get(1) else {
                 eprintln!("veilctl: `set` needs a file path");
@@ -552,5 +557,32 @@ fn pretty(response: &serde_json::Value) {
     match serde_json::to_string_pretty(response) {
         Ok(text) => println!("{text}"),
         Err(_) => println!("{response}"),
+    }
+}
+
+/// `veilctl widgets`: what the config asks for and whether a renderer is up.
+fn widgets_command() {
+    let (cfg, path) = match Config::load() {
+        Ok(loaded) => loaded,
+        Err(error) => {
+            eprintln!("veilctl: {error}");
+            std::process::exit(1);
+        }
+    };
+    let enabled = cfg.widgets.iter().filter(|widget| widget.enabled).count();
+    println!("config:  {}", path.display());
+    println!("widgets: {} ({enabled} enabled)", cfg.widgets.len());
+    for widget in &cfg.widgets {
+        let state = if widget.enabled { "" } else { " (off)" };
+        println!("  {}{state}", widget.summary());
+    }
+    let running = std::process::Command::new("pgrep")
+        .args(["-f", "veil-widgets"])
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false);
+    println!("running: {}", if running { "yes" } else { "no" });
+    if enabled > 0 && !running {
+        println!("hint:   start it with `veil-widgets &` or add it to the compositor autostart");
     }
 }

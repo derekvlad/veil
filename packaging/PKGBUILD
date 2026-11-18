@@ -13,8 +13,9 @@ pkgdesc="GPU-decoded video wallpapers for wlr-layer-shell Wayland compositors"
 arch=('x86_64' 'aarch64')
 url="https://github.com/veil-wallpaper/veil"
 license=('MIT')
-depends=('mpv' 'libglvnd' 'gtk4' 'libadwaita')
-optdepends=('linux-wallpaperengine-git: Wallpaper Engine scenes')
+depends=('mpv' 'libglvnd' 'gtk4' 'libadwaita' 'gtk4-layer-shell')
+optdepends=('linux-wallpaperengine-git: Wallpaper Engine scenes'
+            'playerctl: now-playing widget')
 makedepends=('cargo' 'rust' 'pkgconf')
 provides=('veil')
 conflicts=('veil')
@@ -39,6 +40,7 @@ package() {
     install -Dm755 target/release/veild "$pkgdir/usr/bin/veild"
     install -Dm755 target/release/veilctl "$pkgdir/usr/bin/veilctl"
     install -Dm755 target/release/veil-gui "$pkgdir/usr/bin/veil-gui"
+    install -Dm755 target/release/veil-widgets "$pkgdir/usr/bin/veil-widgets"
 
     install -Dm644 packaging/org.veil.Veil.desktop \
         "$pkgdir/usr/share/applications/org.veil.Veil.desktop"
