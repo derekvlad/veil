@@ -291,7 +291,7 @@ fn build_window(app: &adw::Application) {
     title.add_css_class("title");
     header.set_title_widget(Some(&title));
 
-    let workshop_button = gtk::Button::from_icon_name("system-software-install-symbolic");
+    let workshop_button = gtk::Button::from_icon_name("folder-download-symbolic");
     workshop_button.add_css_class("flat");
     workshop_button.set_tooltip_text(Some(t("Wallpaper workshop", "Мастерская обоев")));
     header.pack_end(&workshop_button);
