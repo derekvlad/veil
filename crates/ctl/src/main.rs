@@ -349,8 +349,17 @@ fn engine_command(args: &[String]) {
             }
             if !cfg.engine.properties.is_empty() {
                 println!();
+                println!("overrides in the config (they go to every scene):");
                 for (key, value) in &cfg.engine.properties {
-                    println!("override: {key} = {value}");
+                    let known = properties.iter().any(|property| &property.key == key);
+                    println!(
+                        "  {key} = {value}{}",
+                        if known {
+                            ""
+                        } else {
+                            "   (this scene has no such setting)"
+                        }
+                    );
                 }
             }
             println!();
